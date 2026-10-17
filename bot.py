@@ -60,16 +60,20 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Public prices seen in the screenshots. Verify/update these before accepting payments.
+# Turkey VIP server was discontinued and is intentionally removed from the shop.
 PRODUCTS = {
     "🎮 سرور تانل گیمینگ VIP": [
         ("هر گیگابایت", 8000),
     ],
-    "🇹🇷 سرور ترکیه VIP": [
-        ("هر گیگابایت", 6000),
-    ],
     "🌐 سرور وب‌گردی V2Ray": [
         ("هر گیگابایت", 5000),
     ],
+}
+
+# Map each purchasable panel to its own admin-controlled availability switch.
+PANEL_SECTION_KEYS = {
+    "🎮 سرور تانل گیمینگ VIP": "gaming",
+    "🌐 سرور وب‌گردی V2Ray": "v2ray",
 }
 
 MAIN_MENU = [
@@ -272,7 +276,8 @@ def save_access_data(data):
 
 SECTION_NAMES = {
     "purchase": "خرید سرویس / انتخاب پنل و سرور",
-    "gaming": "سرور گیمینگ",
+    "gaming": "سرور تانل گیمینگ VIP",
+    "v2ray": "سرور وب‌گردی V2Ray",
     "market": "شاپ اکانت بازی‌ها",
     "virtual": "خدمات مجازی",
     "test": "اکانت تست",
@@ -661,7 +666,11 @@ async def panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if idx < 0 or idx >= len(panels):
             await query.message.reply_text("گزینه نامعتبر است.")
             return
-        context.user_data["panel"] = panels[idx]
+        selected_panel = panels[idx]
+        section_key = PANEL_SECTION_KEYS.get(selected_panel)
+        if section_key and not is_admin(query.from_user.id) and await section_gate(query.message, section_key):
+            return
+        context.user_data["panel"] = selected_panel
         percent = load_user_discount_percent(query.from_user.id)
         keyboard = [
             [InlineKeyboardButton(
@@ -686,6 +695,9 @@ async def panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("product:"):
         panel = context.user_data.get("panel")
+        section_key = PANEL_SECTION_KEYS.get(panel)
+        if section_key and not is_admin(query.from_user.id) and await section_gate(query.message, section_key):
+            return
         if panel not in PRODUCTS:
             await query.message.reply_text("از منوی اصلی دوباره خرید را شروع کنید.")
             return
