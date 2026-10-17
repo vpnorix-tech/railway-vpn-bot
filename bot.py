@@ -1033,11 +1033,16 @@ async def review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                   "در صورت تمایل، می‌توانید از بخش زیر خرید دیگری را آغاز کنید."),
             reply_markup=server_selection_markup(),
         )
+        # The admin who approves the receipt can immediately send the config in this chat.
+        # The order/customer IDs are resolved automatically; no command arguments are needed.
+        context.user_data["config_order_id"] = str(order_id)
+        context.user_data.pop("pending_config_delivery", None)
         await query.message.reply_text(
-            f"رسید سفارش #{order_id} تأیید شد.\n"
-            f"برای تحویل کانفیگ، دستور زیر را در همین چت با ربات ارسال کنید:\n"
-            f"/sendconfig {order_id} آیدی_عددی_مشتری\n"
-            "سپس در پیام بعدی متن کانفیگ را ارسال کنید."
+            f"✅ رسید سفارش #{order.get('order_number', order_id)} تأیید شد.\\n"
+            f"👤 مشتری: {order.get('customer_name', '—')} | 🆔 {order.get('user_id')}\\n"
+            f"📦 سرویس: {order.get('panel', '—')} — {order.get('product', '—')}\\n\\n"
+            "حالا متن کانفیگ یا فایل کانفیگ (مثل فایل WireGuard) را همین‌جا بفرست.\\n"
+            "بعد از ارسال محتوا، دکمه تأیید ارسال برای مشتری نمایش داده می‌شود."
         )
     elif decision == "reject":
         order["status"] = "رسید ردشده"
@@ -1094,74 +1099,152 @@ async def sendconfig_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def handle_config_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Stage admin-provided config text and ask before delivering it to the customer."""
     if not update.effective_user or not is_admin(update.effective_user.id):
         return False
     order_id = context.user_data.get("config_order_id")
     if not order_id:
         return False
-    text_value = (update.message.text or "").strip()
+
+    text_value = (update.effective_message.text or "").strip()
     if not text_value:
-        await update.message.reply_text("متن کانفیگ خالی است؛ دوباره ارسال کنید.")
+        await update.effective_message.reply_text("متن کانفیگ خالی است؛ دوباره ارسال کنید.")
         return True
+
     db = load_db()
     order = db["orders"].get(str(order_id))
-    if not order or order["status"] != "رسید تأییدشده؛ در انتظار کانفیگ":
+    if not order or order.get("status") != "رسید تأییدشده؛ در انتظار کانفیگ":
         context.user_data.pop("config_order_id", None)
-        await update.message.reply_text("این سفارش دیگر آماده تحویل نیست.")
+        await update.effective_message.reply_text("این سفارش دیگر آماده تحویل نیست.")
         return True
-    try:
-        await context.bot.send_message(
-            chat_id=order["user_id"],
-            text=f"🎉 اطلاعات سرویس سفارش #{order_id} از طرف پشتیبانی:\n\n{text_value}",
-        )
-    except Exception:
-        logger.exception("Failed to send config text to customer")
-        await update.message.reply_text("ارسال به مشتری ناموفق بود. مطمئن شوید مشتری قبلاً ربات را Start کرده باشد.")
-        return True
-    order["status"] = "کانفیگ تحویل داده شد"
-    order["config_sent"] = True
-    order["config_sent_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    save_db(db)
-    context.user_data.pop("config_order_id", None)
-    await update.message.reply_text(f"اطلاعات سفارش #{order_id} با موفقیت به مشتری ارسال شد.")
+
+    context.user_data["pending_config_delivery"] = {
+        "order_id": str(order_id), "kind": "text", "text": text_value,
+    }
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📩 ارسال به پیوی مشتری", callback_data=f"deliver_config:{order_id}")],
+        [InlineKeyboardButton("❌ لغو ارسال", callback_data=f"cancel_config_delivery:{order_id}")],
+    ])
+    await update.effective_message.reply_text(
+        f"📦 کانفیگ سفارش #{order.get('order_number', order_id)} آماده ارسال است.\\n"
+        f"👤 مشتری: {order.get('customer_name', '—')} | 🆔 {order.get('user_id')}\\n\\n"
+        "برای ارسال کانفیگ به مشتری، دکمه زیر را بزنید.",
+        reply_markup=keyboard,
+    )
     return True
 
 
 async def handle_config_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Forward an admin's document, photo, or video as the delivery for an approved order."""
+    """Stage admin-sent media and ask before delivering it to the customer."""
     if not update.effective_user or not is_admin(update.effective_user.id):
         return False
     order_id = context.user_data.get("config_order_id")
     message = update.effective_message
     if not order_id or not message:
         return False
+
     db = load_db()
     order = db["orders"].get(str(order_id))
     if not order or order.get("status") != "رسید تأییدشده؛ در انتظار کانفیگ":
         context.user_data.pop("config_order_id", None)
         await message.reply_text("این سفارش دیگر آماده تحویل نیست.")
         return True
-    caption = f"🎉 اطلاعات سرویس سفارش #{order_id} از طرف پشتیبانی"
+
+    context.user_data["pending_config_delivery"] = {
+        "order_id": str(order_id), "kind": "copy_message",
+        "chat_id": message.chat_id, "message_id": message.message_id,
+    }
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📩 ارسال به پیوی مشتری", callback_data=f"deliver_config:{order_id}")],
+        [InlineKeyboardButton("❌ لغو ارسال", callback_data=f"cancel_config_delivery:{order_id}")],
+    ])
+    await message.reply_text(
+        f"📦 فایل/رسانه سفارش #{order.get('order_number', order_id)} آماده ارسال است.\\n"
+        f"👤 مشتری: {order.get('customer_name', '—')} | 🆔 {order.get('user_id')}\\n\\n"
+        "برای ارسال فایل به مشتری، دکمه زیر را بزنید.",
+        reply_markup=keyboard,
+    )
+    return True
+
+
+async def config_delivery_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Deliver staged text/media to the customer associated with the approved order."""
+    query = update.callback_query
+    if not is_admin(query.from_user.id):
+        await query.answer("فقط ادمین اجازه ارسال کانفیگ را دارد.", show_alert=True)
+        return
+    await query.answer()
     try:
-        if message.document:
-            await context.bot.send_document(order["user_id"], message.document.file_id, caption=caption)
-        elif message.video:
-            await context.bot.send_video(order["user_id"], message.video.file_id, caption=caption)
-        elif message.photo:
-            await context.bot.send_photo(order["user_id"], message.photo[-1].file_id, caption=caption)
+        action, order_id = query.data.split(":", 1)
+    except ValueError:
+        await query.message.reply_text("درخواست ارسال نامعتبر است.")
+        return
+
+    pending = context.user_data.get("pending_config_delivery")
+    if action == "cancel_config_delivery":
+        if pending and str(pending.get("order_id")) == order_id:
+            context.user_data.pop("pending_config_delivery", None)
+        await query.edit_message_reply_markup(reply_markup=None)
+        await query.message.reply_text(
+            "ارسال لغو شد. سفارش همچنان در انتظار کانفیگ است؛ برای ادامه، متن یا فایل را دوباره بفرست."
+        )
+        return
+
+    if action != "deliver_config":
+        return
+    if not pending or str(pending.get("order_id")) != order_id:
+        await query.message.reply_text("محتوای آماده ارسال پیدا نشد؛ متن یا فایل کانفیگ را دوباره بفرست.")
+        return
+
+    db = load_db()
+    order = db.get("orders", {}).get(order_id)
+    if not order or order.get("status") != "رسید تأییدشده؛ در انتظار کانفیگ":
+        context.user_data.pop("pending_config_delivery", None)
+        await query.message.reply_text("این سفارش دیگر آماده تحویل نیست.")
+        return
+
+    try:
+        await context.bot.send_message(
+            chat_id=order["user_id"],
+            text=f"🎉 اطلاعات سرویس سفارش #{order.get('order_number', order_id)} از طرف پشتیبانی:",
+        )
+        if pending.get("kind") == "text":
+            await context.bot.send_message(chat_id=order["user_id"], text=pending["text"])
+        elif pending.get("kind") == "copy_message":
+            await context.bot.copy_message(
+                chat_id=order["user_id"],
+                from_chat_id=pending["chat_id"],
+                message_id=pending["message_id"],
+            )
         else:
-            return False
+            await query.message.reply_text("نوع محتوای کانفیگ پشتیبانی نمی‌شود.")
+            return
     except Exception:
-        logger.exception("Failed to send config media to customer")
-        await message.reply_text("ارسال فایل به مشتری ناموفق بود. مطمئن شوید مشتری قبلاً ربات را Start کرده باشد.")
-        return True
+        logger.exception("Failed to deliver config for order %s", order_id)
+        await query.message.reply_text(
+            "❌ ارسال به مشتری ناموفق بود. مطمئن شوید مشتری قبلاً ربات را Start کرده باشد؛ "
+            "سفارش همچنان در انتظار کانفیگ می‌ماند."
+        )
+        return
+
     order["status"] = "کانفیگ تحویل داده شد"
     order["config_sent"] = True
     order["config_sent_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    order["config_sent_by"] = query.from_user.id
     save_db(db)
+    context.user_data.pop("pending_config_delivery", None)
     context.user_data.pop("config_order_id", None)
-    await message.reply_text(f"فایل سفارش #{order_id} با موفقیت به مشتری ارسال شد.")
-    return True
+    try:
+        await context.bot.send_message(
+            chat_id=order["user_id"],
+            text=f"✅ سفارش #{order.get('order_number', order_id)} با موفقیت تحویل داده شد. ممنون از خرید شما!",
+        )
+    except Exception:
+        logger.warning("Config delivered but final confirmation could not be sent for order %s", order_id)
+    await query.edit_message_reply_markup(reply_markup=None)
+    await query.message.reply_text(
+        f"✅ کانفیگ سفارش #{order.get('order_number', order_id)} به مشتری ارسال شد و سفارش تحویل‌داده‌شده ثبت شد."
+    )
 
 
 async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1471,37 +1554,6 @@ async def test_request_callback(update: Update, context: ContextTypes.DEFAULT_TY
             logger.exception("Could not notify admin about test claim")
 
 
-async def contact_reply_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Let an admin choose a customer and then reply by typing only the message."""
-    query = update.callback_query
-    if not query:
-        return
-    actor = query.from_user
-    if not is_admin(actor.id):
-        await query.answer("این گزینه فقط برای ادمین است.", show_alert=True)
-        return
-    await query.answer()
-    try:
-        target_id = int((query.data or "").split(":", 1)[1])
-    except (IndexError, ValueError):
-        await query.message.reply_text("آیدی مشتری معتبر نیست.")
-        return
-    context.user_data["reply_to_user_id"] = target_id
-    await query.message.reply_text(
-        f"✍️ پاسخ به مشتری با آیدی {target_id} انتخاب شد.\n\n"
-        "حالا فقط متن پیام را بفرست؛ ربات آن را برای مشتری ارسال می‌کند.\n"
-        "برای لغو، /cancelreply را بزن."
-    )
-
-
-async def cancel_reply_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.effective_user or not is_admin(update.effective_user.id):
-        await update.effective_message.reply_text("⛔ این دستور فقط برای ادمین است.")
-        return
-    context.user_data.pop("reply_to_user_id", None)
-    await update.effective_message.reply_text("پاسخ‌گویی لغو شد.")
-
-
 async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.business_message:
         return
@@ -1510,28 +1562,6 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await access_gate(update, context):
         return
     txt = (update.message.text or "").strip()
-
-    # If an admin selected “پیام دادن به مشتری”, their next text is sent directly.
-    reply_target = context.user_data.get("reply_to_user_id")
-    if reply_target and update.effective_user and is_admin(update.effective_user.id):
-        if txt in ("لغو", "انصراف", "/cancelreply"):
-            context.user_data.pop("reply_to_user_id", None)
-            await update.message.reply_text("پاسخ‌گویی لغو شد.")
-            return
-        try:
-            await context.bot.send_message(chat_id=int(reply_target), text=txt)
-        except Forbidden:
-            await update.message.reply_text(
-                "❌ پیام ارسال نشد؛ احتمالاً مشتری ربات را شروع نکرده یا ربات را مسدود کرده است."
-            )
-        except TelegramError:
-            logger.exception("Could not send admin reply to user %s", reply_target)
-            await update.message.reply_text("❌ ارسال پیام ناموفق بود. خطا در گزارش ربات ثبت شد.")
-        else:
-            await update.message.reply_text(f"✅ پیام برای مشتری {reply_target} ارسال شد.")
-        finally:
-            context.user_data.pop("reply_to_user_id", None)
-        return
 
     if txt in ("🔙 منوی اصلی", "🔙 بازگشت به منوی اصلی"):
         # If the user is in the payment/receipt stage, treat going back as cancelling that order.
@@ -1567,24 +1597,18 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             subject = "🤝 درخواست جدید نمایندگی"
             body = txt
-        target_id = user.id if user else 0
         admin_text = (
             f"{subject}\n\n"
             f"👤 نام: {display_name}\n"
             f"🔗 نام کاربری: {username}\n"
-            f"🆔 آیدی عددی: {target_id}\n\n"
-            f"📝 متن درخواست:\n{body[:3500]}"
+            f"🆔 آیدی عددی: {user.id if user else 'نامشخص'}\n\n"
+            f"📝 متن درخواست:\n{body[:3500]}\n\n"
+            f"برای پاسخ: /senduser {user.id if user else 0} متن پیام"
         )
-        admin_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✉️ پیام دادن به مشتری از داخل ربات", callback_data=f"contact_reply:{target_id}")],
-            [InlineKeyboardButton("👤 رفتن به پیوی مشتری", url=f"tg://user?id={target_id}")],
-        ])
         sent = 0
         for admin_id in load_admin_ids():
             try:
-                await context.bot.send_message(
-                    chat_id=admin_id, text=admin_text, reply_markup=admin_keyboard
-                )
+                await context.bot.send_message(chat_id=admin_id, text=admin_text)
                 sent += 1
             except Exception:
                 logger.exception("Could not forward %s message from user %s to admin %s", contact_flow, user.id if user else None, admin_id)
@@ -2370,7 +2394,6 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("broadcast", broadcast_command))
     app.add_handler(CommandHandler(["senduser", "send_user"], senduser_command))
-    app.add_handler(CommandHandler("cancelreply", cancel_reply_command))
     app.add_handler(CommandHandler("block", block_command))
     app.add_handler(CommandHandler("unblock", unblock_command))
     app.add_handler(CommandHandler("ban", ban_command))
@@ -2399,7 +2422,6 @@ def main():
     app.add_handler(CommandHandler("section_close", section_close_command))
     app.add_handler(CommandHandler("section_open", section_open_command))
     app.add_handler(CommandHandler("sections", sections_command))
-    app.add_handler(CallbackQueryHandler(contact_reply_callback, pattern=r"^contact_reply:\d+$"))
     app.add_handler(CallbackQueryHandler(global_back_callback, pattern=r"^global_back$"))
     app.add_handler(CallbackQueryHandler(test_request_callback, pattern=r"^test:request$"))
     app.add_handler(CallbackQueryHandler(cancel_active_order_callback, pattern=r"^cancel_active_order:\d+$"))
@@ -2407,6 +2429,7 @@ def main():
     app.add_handler(CallbackQueryHandler(order_callback, pattern=r"^(confirm_order|cancel_order)$"))
     app.add_handler(CallbackQueryHandler(renew_service_callback, pattern=r"^renew_service:\d+$"))
     app.add_handler(CallbackQueryHandler(review_callback, pattern=r"^review:(approve|reject):\d+$"))
+    app.add_handler(CallbackQueryHandler(config_delivery_callback, pattern=r"^(deliver_config|cancel_config_delivery):\d+$"))
     app.add_handler(CallbackQueryHandler(market_callback, pattern=r"^market:"))
     app.add_handler(CallbackQueryHandler(virtual_service_callback, pattern=r"^virtual:\d+$"))
     app.add_handler(MessageHandler(filters.PHOTO, market_photo_input))
