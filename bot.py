@@ -9,7 +9,6 @@ import json
 import logging
 import os
 import asyncio
-import threading
 import urllib.request
 import urllib.error
 from datetime import datetime
@@ -38,28 +37,16 @@ from telegram.ext import (
 # Set these in your environment or replace BOT_TOKEN locally with a NEW token.
 # The token previously included in the uploaded file should be revoked in @BotFather.
 BOT_TOKEN = os.getenv("BOT_TOKEN", "PASTE_NEW_BOT_TOKEN_HERE")
-
-# Required: no hardcoded fallback. A default admin ID would silently route
-# another operator's admin notifications (orders, receipts, broadcasts) to a
-# stranger's Telegram account, so this must fail loudly when unset.
-_raw_admin_id = os.getenv("ADMIN_ID", "").strip()
-if not _raw_admin_id.isdigit():
-    raise SystemExit(
-        "ADMIN_ID تنظیم نشده. شناسه عددی تلگرام مدیر اصلی را در متغیرهای محیطی "
-        "قرار بده (می‌توانی از @userinfobot یا @getmyid_bot بگیری)."
-    )
-ADMIN_ID = int(_raw_admin_id)
-DB_FILE = (_DATA_DIR := Path(os.getenv("DATA_DIR") or Path(__file__).parent)) / "orders.json"
-MARKET_FILE = _DATA_DIR / "game_account_listings.json"
-SECRETARY_FILE = _DATA_DIR / "secretary_settings.json"
-ADMINS_FILE = _DATA_DIR / "admins.json"
-DISCOUNT_FILE = _DATA_DIR / "discount_settings.json"
-USERS_FILE = _DATA_DIR / "users.json"
-ACCESS_FILE = _DATA_DIR / "access_settings.json"
-TEST_FILE = _DATA_DIR / "test_accounts.json"
-# The container filesystem is replaced on every redeploy, so DATA_DIR must point
-# at a mounted volume for orders, users, and settings to survive.
-_DATA_DIR.mkdir(parents=True, exist_ok=True)
+ADMIN_ID = int(os.getenv("ADMIN_ID", "8928341236"))
+DB_FILE = Path(__file__).with_name("orders.json")
+MARKET_FILE = Path(__file__).with_name("game_account_listings.json")
+SECRETARY_FILE = Path(__file__).with_name("secretary_settings.json")
+ADMINS_FILE = Path(__file__).with_name("admins.json")
+DISCOUNT_FILE = Path(__file__).with_name("discount_settings.json")
+USERS_FILE = Path(__file__).with_name("users.json")
+ACCESS_FILE = Path(__file__).with_name("access_settings.json")
+SECTION_FILE = Path(__file__).with_name("section_settings.json")
+TEST_FILE = Path(__file__).with_name("test_accounts.json")
 # Serializes test-pool updates so two nearly simultaneous requests cannot take the same link.
 TEST_ACCOUNTS_LOCK = asyncio.Lock()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
@@ -73,16 +60,28 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Public prices seen in the screenshots. Verify/update these before accepting payments.
+# Turkey VIP server was discontinued and is intentionally removed from the shop.
 PRODUCTS = {
-    "🎮 سرور تانل گیمینگ VIP": [
-        ("هر گیگابایت", 8000),
-    ],
-    "🇹🇷 سرور ترکیه VIP": [
+    "🎮 سرور وایرگاد گیمینگ VIP": [
         ("هر گیگابایت", 6000),
     ],
     "🌐 سرور وب‌گردی V2Ray": [
         ("هر گیگابایت", 5000),
     ],
+    "♾️ سرور نامحدود VIP": [
+        ("۱ ماه", 150000),
+        ("۲ ماه", 300000),
+        ("۳ ماه", 450000),
+        ("۴ ماه", 600000),
+        ("۵ ماه", 750000),
+    ],
+}
+
+# Each panel has its own admin-controlled availability switch.
+PANEL_SECTION_KEYS = {
+    "🎮 سرور وایرگاد گیمینگ VIP": "gaming",
+    "🌐 سرور وب‌گردی V2Ray": "v2ray",
+    "♾️ سرور نامحدود VIP": "unlimited",
 }
 
 MAIN_MENU = [
@@ -188,6 +187,43 @@ def save_discount_percent(percent):
     tmp.replace(DISCOUNT_FILE)
 
 
+def load_user_discount_percent(user_id):
+    """Return a customer-specific discount if set, otherwise the global discount."""
+    try:
+        if DISCOUNT_FILE.exists():
+            with DISCOUNT_FILE.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            users = data.get("users", {})
+            key = str(int(user_id))
+            if key in users:
+                return max(0, min(100, int(users[key])))
+    except Exception:
+        logger.exception("Could not read customer discounts")
+    return load_discount_percent()
+
+
+def save_user_discount_percent(user_id, percent):
+    """Persist a customer-specific discount while preserving the global setting."""
+    data = {}
+    if DISCOUNT_FILE.exists():
+        try:
+            with DISCOUNT_FILE.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+    data.setdefault("percent", 0)
+    data.setdefault("users", {})
+    key = str(int(user_id))
+    if int(percent) == 0:
+        data["users"].pop(key, None)
+    else:
+        data["users"][key] = int(percent)
+    tmp = DISCOUNT_FILE.with_suffix(".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    tmp.replace(DISCOUNT_FILE)
+
+
 def discounted_price(price, percent=None):
     if percent is None:
         percent = load_discount_percent()
@@ -244,6 +280,102 @@ def save_access_data(data):
     with tmp.open("w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     tmp.replace(ACCESS_FILE)
+
+
+SECTION_NAMES = {
+    "purchase": "خرید سرویس / انتخاب پنل و سرور",
+    "gaming": "سرور تانل گیمینگ VIP",
+    "v2ray": "سرور وب‌گردی V2Ray",
+    "unlimited": "سرور نامحدود VIP",
+    "market": "شاپ اکانت بازی‌ها",
+    "virtual": "خدمات مجازی",
+    "test": "اکانت تست",
+    "tariffs": "تعرفه سرویس‌ها",
+    "renew": "تمدید سرویس",
+}
+
+
+def load_section_settings():
+    if not SECTION_FILE.exists():
+        return {}
+    try:
+        with SECTION_FILE.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        logger.exception("Could not read section settings")
+        return {}
+
+
+def save_section_settings(data):
+    tmp = SECTION_FILE.with_suffix(".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    tmp.replace(SECTION_FILE)
+
+
+def section_is_closed(key):
+    return key in load_section_settings()
+
+
+async def section_gate(message, key):
+    """Tell the customer the admin's custom message if a section is closed."""
+    setting = load_section_settings().get(key)
+    if not setting:
+        return False
+    await message.reply_text(setting.get("message", "این قسمت موقتاً در دسترس نیست."))
+    return True
+
+
+async def section_close_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.effective_message.reply_text("⛔ این دستور فقط برای ادمین است.")
+        return
+    if len(context.args) < 2:
+        keys = "\n".join(f"{key} — {name}" for key, name in SECTION_NAMES.items())
+        await update.effective_message.reply_text(
+            "فرمت:\n/section_close purchase این قسمت در حال آپدیت است\n\n"
+            "بخش‌های قابل بستن (کلید انگلیسی):\n" + keys
+        )
+        return
+    key = context.args[0].lower()
+    if key not in SECTION_NAMES:
+        await update.effective_message.reply_text("کلید بخش نامعتبر است. برای دیدن فهرست، /section_close را بفرستید.")
+        return
+    message = " ".join(context.args[1:]).strip()
+    data = load_section_settings()
+    data[key] = {"message": message}
+    save_section_settings(data)
+    await update.effective_message.reply_text(f"✅ بخش «{SECTION_NAMES[key]}» بسته شد.\nپیام مشتری: {message}\nبرای بازکردن: /section_open {key}")
+
+
+async def section_open_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.effective_message.reply_text("⛔ این دستور فقط برای ادمین است.")
+        return
+    if not context.args:
+        await update.effective_message.reply_text("فرمت: /section_open purchase")
+        return
+    key = context.args[0].lower()
+    if key not in SECTION_NAMES:
+        await update.effective_message.reply_text("کلید بخش نامعتبر است.")
+        return
+    data = load_section_settings()
+    data.pop(key, None)
+    save_section_settings(data)
+    await update.effective_message.reply_text(f"✅ بخش «{SECTION_NAMES[key]}» دوباره باز شد.")
+
+
+async def sections_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.effective_message.reply_text("⛔ این دستور فقط برای ادمین است.")
+        return
+    data = load_section_settings()
+    lines = ["وضعیت بخش‌های ربات:"]
+    for key, name in SECTION_NAMES.items():
+        status = f"🔴 بسته — {data[key].get('message', '')}" if key in data else "🟢 باز"
+        lines.append(f"{key} | {name}: {status}")
+    await update.effective_message.reply_text("\n".join(lines))
 
 
 async def access_gate(update, context):
@@ -495,7 +627,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def show_tariffs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    percent = load_discount_percent()
+    percent = load_user_discount_percent(update.effective_user.id)
     lines = ["💰 تعرفه سرویس‌ها\n"]
     if percent:
         lines.append(f"🏷 تخفیف فعال: {percent}٪\n")
@@ -518,6 +650,8 @@ def server_selection_markup():
 
 
 async def begin_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id) and await section_gate(update.effective_message, "purchase"):
+        return
     await update.effective_message.reply_text(
         "🌍 لطفاً سرور موردنظر را انتخاب کنید:",
         reply_markup=server_selection_markup(),
@@ -526,8 +660,44 @@ async def begin_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     data = query.data
+
+    # Check the section switch before answering/opening a panel. Use a Telegram
+    # alert so the customer immediately sees the admin's custom maintenance text.
+    async def deny_if_closed(key):
+        if is_admin(query.from_user.id):
+            return False
+        setting = load_section_settings().get(key)
+        if not setting:
+            return False
+        message = str(setting.get("message") or "این قسمت موقتاً در دسترس نیست.")
+        await query.answer(text=message[:190], show_alert=True)
+        return True
+
+    # Handle section gates before the generic callback acknowledgement.
+    if data.startswith("panel:"):
+        if await deny_if_closed("purchase"):
+            return
+        panels = list(PRODUCTS)
+        try:
+            idx = int(data.split(":", 1)[1])
+            selected_panel = panels[idx] if 0 <= idx < len(panels) else None
+        except (ValueError, IndexError):
+            selected_panel = None
+        if selected_panel is None:
+            await query.answer("گزینه نامعتبر است.", show_alert=True)
+            return
+        section_key = PANEL_SECTION_KEYS.get(selected_panel)
+        if section_key and await deny_if_closed(section_key):
+            return
+
+    elif data.startswith("product:"):
+        panel = context.user_data.get("panel")
+        section_key = PANEL_SECTION_KEYS.get(panel)
+        if section_key and await deny_if_closed(section_key):
+            return
+
+    await query.answer()
 
     if data == "back":
         await query.message.reply_text("به منوی اصلی برگشتید.", reply_markup=MAIN_MARKUP)
@@ -539,8 +709,9 @@ async def panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if idx < 0 or idx >= len(panels):
             await query.message.reply_text("گزینه نامعتبر است.")
             return
-        context.user_data["panel"] = panels[idx]
-        percent = load_discount_percent()
+        selected_panel = panels[idx]
+        context.user_data["panel"] = selected_panel
+        percent = load_user_discount_percent(query.from_user.id)
         keyboard = [
             [InlineKeyboardButton(
                 f"{name} — {money(discounted_price(price, percent))}" + (f" (تخفیف {percent}٪)" if percent else ""),
@@ -578,6 +749,8 @@ async def panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["quantity_waiting"] = True
         if product == "هر گیگابایت":
             prompt = "⚠️ توجه: حداقل خرید سرویس ۱۰ گیگابایت و حداکثر ۲۰۰ گیگابایت است.\n\nحجم موردنظر را با عدد انگلیسی بین 10 تا 200 بفرستید. مثال: 10"
+        elif panel == "♾️ سرور نامحدود VIP":
+            prompt = f"مدت انتخابی: {product}\nبرای ادامه و ثبت همین پلن، عدد 1 را بفرستید."
         else:
             prompt = "لطفاً تعداد موردنظر را وارد کنید (فعلاً از 1 تا 10)."
         await query.message.reply_text(prompt)
@@ -594,6 +767,8 @@ VIRTUAL_PRODUCTS = [
 async def virtual_service_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    if not is_admin(query.from_user.id) and await section_gate(query.message, "virtual"):
+        return
     try:
         index = int(query.data.split(":", 1)[1])
         if index < 0 or index >= len(VIRTUAL_PRODUCTS):
@@ -665,7 +840,7 @@ async def handle_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["quantity_waiting"] = False
     original_amount = quantity * unit_price
-    discount_percent = load_discount_percent()
+    discount_percent = load_user_discount_percent(update.effective_user.id)
     amount = discounted_price(original_amount, discount_percent)
     discount_amount = original_amount - amount
     context.user_data["pending_order"] = {
@@ -919,7 +1094,7 @@ async def sendconfig_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def handle_config_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    if not update.effective_user or not is_admin(update.effective_user.id):
         return False
     order_id = context.user_data.get("config_order_id")
     if not order_id:
@@ -937,20 +1112,55 @@ async def handle_config_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         await context.bot.send_message(
             chat_id=order["user_id"],
-            text=f"🎉 کانفیگ سفارش #{order_id} شما آماده است:\n\n{text_value}",
+            text=f"🎉 اطلاعات سرویس سفارش #{order_id} از طرف پشتیبانی:\n\n{text_value}",
         )
     except Exception:
-        logger.exception("Failed to send config to customer")
-        await update.message.reply_text(
-            "ارسال کانفیگ به مشتری ناموفق بود. بررسی کنید مشتری قبلاً ربات را Start کرده باشد."
-        )
+        logger.exception("Failed to send config text to customer")
+        await update.message.reply_text("ارسال به مشتری ناموفق بود. مطمئن شوید مشتری قبلاً ربات را Start کرده باشد.")
         return True
     order["status"] = "کانفیگ تحویل داده شد"
     order["config_sent"] = True
     order["config_sent_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     save_db(db)
     context.user_data.pop("config_order_id", None)
-    await update.message.reply_text(f"کانفیگ سفارش #{order_id} با موفقیت ارسال شد.")
+    await update.message.reply_text(f"اطلاعات سفارش #{order_id} با موفقیت به مشتری ارسال شد.")
+    return True
+
+
+async def handle_config_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Forward an admin's document, photo, or video as the delivery for an approved order."""
+    if not update.effective_user or not is_admin(update.effective_user.id):
+        return False
+    order_id = context.user_data.get("config_order_id")
+    message = update.effective_message
+    if not order_id or not message:
+        return False
+    db = load_db()
+    order = db["orders"].get(str(order_id))
+    if not order or order.get("status") != "رسید تأییدشده؛ در انتظار کانفیگ":
+        context.user_data.pop("config_order_id", None)
+        await message.reply_text("این سفارش دیگر آماده تحویل نیست.")
+        return True
+    caption = f"🎉 اطلاعات سرویس سفارش #{order_id} از طرف پشتیبانی"
+    try:
+        if message.document:
+            await context.bot.send_document(order["user_id"], message.document.file_id, caption=caption)
+        elif message.video:
+            await context.bot.send_video(order["user_id"], message.video.file_id, caption=caption)
+        elif message.photo:
+            await context.bot.send_photo(order["user_id"], message.photo[-1].file_id, caption=caption)
+        else:
+            return False
+    except Exception:
+        logger.exception("Failed to send config media to customer")
+        await message.reply_text("ارسال فایل به مشتری ناموفق بود. مطمئن شوید مشتری قبلاً ربات را Start کرده باشد.")
+        return True
+    order["status"] = "کانفیگ تحویل داده شد"
+    order["config_sent"] = True
+    order["config_sent_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    save_db(db)
+    context.user_data.pop("config_order_id", None)
+    await message.reply_text(f"فایل سفارش #{order_id} با موفقیت به مشتری ارسال شد.")
     return True
 
 
@@ -1027,7 +1237,7 @@ async def renew_service_callback(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     original_amount = quantity * unit_price
-    discount_percent = load_discount_percent()
+    discount_percent = load_user_discount_percent(query.from_user.id)
     amount = discounted_price(original_amount, discount_percent)
     discount_amount = original_amount - amount
     order_id = db["next_id"]
@@ -1186,6 +1396,8 @@ async def test_request_callback(update: Update, context: ContextTypes.DEFAULT_TY
     user = query.from_user
     if not user or not query.message:
         return
+    if not is_admin(user.id) and await section_gate(query.message, "test"):
+        return
 
     user_key = str(user.id)
     # Claim + save happen under one lock: each user gets one link, and each link
@@ -1259,6 +1471,37 @@ async def test_request_callback(update: Update, context: ContextTypes.DEFAULT_TY
             logger.exception("Could not notify admin about test claim")
 
 
+async def contact_reply_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Let an admin choose a customer and then reply by typing only the message."""
+    query = update.callback_query
+    if not query:
+        return
+    actor = query.from_user
+    if not is_admin(actor.id):
+        await query.answer("این گزینه فقط برای ادمین است.", show_alert=True)
+        return
+    await query.answer()
+    try:
+        target_id = int((query.data or "").split(":", 1)[1])
+    except (IndexError, ValueError):
+        await query.message.reply_text("آیدی مشتری معتبر نیست.")
+        return
+    context.user_data["reply_to_user_id"] = target_id
+    await query.message.reply_text(
+        f"✍️ پاسخ به مشتری با آیدی {target_id} انتخاب شد.\n\n"
+        "حالا فقط متن پیام را بفرست؛ ربات آن را برای مشتری ارسال می‌کند.\n"
+        "برای لغو، /cancelreply را بزن."
+    )
+
+
+async def cancel_reply_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin(update.effective_user.id):
+        await update.effective_message.reply_text("⛔ این دستور فقط برای ادمین است.")
+        return
+    context.user_data.pop("reply_to_user_id", None)
+    await update.effective_message.reply_text("پاسخ‌گویی لغو شد.")
+
+
 async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.business_message:
         return
@@ -1268,21 +1511,94 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     txt = (update.message.text or "").strip()
 
+    # If an admin selected “پیام دادن به مشتری”, their next text is sent directly.
+    reply_target = context.user_data.get("reply_to_user_id")
+    if reply_target and update.effective_user and is_admin(update.effective_user.id):
+        if txt in ("لغو", "انصراف", "/cancelreply"):
+            context.user_data.pop("reply_to_user_id", None)
+            await update.message.reply_text("پاسخ‌گویی لغو شد.")
+            return
+        try:
+            await context.bot.send_message(chat_id=int(reply_target), text=txt)
+        except Forbidden:
+            await update.message.reply_text(
+                "❌ پیام ارسال نشد؛ احتمالاً مشتری ربات را شروع نکرده یا ربات را مسدود کرده است."
+            )
+        except TelegramError:
+            logger.exception("Could not send admin reply to user %s", reply_target)
+            await update.message.reply_text("❌ ارسال پیام ناموفق بود. خطا در گزارش ربات ثبت شد.")
+        else:
+            await update.message.reply_text(f"✅ پیام برای مشتری {reply_target} ارسال شد.")
+        finally:
+            context.user_data.pop("reply_to_user_id", None)
+        return
+
     if txt in ("🔙 منوی اصلی", "🔙 بازگشت به منوی اصلی"):
         # If the user is in the payment/receipt stage, treat going back as cancelling that order.
         await cancel_active_order(update.effective_user.id, context)
-        for key in ("quantity_waiting", "pending_order", "market_flow", "panel", "product", "unit_price", "config_flow"):
+        for key in ("quantity_waiting", "pending_order", "market_flow", "panel", "product", "unit_price", "config_flow", "contact_flow"):
             context.user_data.pop(key, None)
         await update.message.reply_text("به منوی اصلی برگشتید. عملیات نیمه‌کاره لغو شد.", reply_markup=MAIN_MARKUP)
         return
 
     if txt == "🔙 بازگشت به انتخاب سرور":
+        context.user_data.pop("contact_flow", None)
         context.user_data.pop("quantity_waiting", None)
         context.user_data.pop("pending_order", None)
         context.user_data.pop("panel", None)
         context.user_data.pop("product", None)
         context.user_data.pop("unit_price", None)
         await begin_purchase(update, context)
+        return
+
+    # Support and dealership requests are forwarded to the configured admins.
+    contact_flow = context.user_data.get("contact_flow")
+    if contact_flow:
+        if txt in ("لغو", "انصراف", "/cancel"):
+            context.user_data.pop("contact_flow", None)
+            await update.message.reply_text("عملیات لغو شد.", reply_markup=MAIN_MARKUP)
+            return
+        user = update.effective_user
+        username = f"@{user.username}" if user and user.username else "ندارد"
+        display_name = user.full_name if user else "نامشخص"
+        if contact_flow == "support":
+            subject = "📩 پیام جدید پشتیبانی"
+            body = txt
+        else:
+            subject = "🤝 درخواست جدید نمایندگی"
+            body = txt
+        target_id = user.id if user else 0
+        admin_text = (
+            f"{subject}\n\n"
+            f"👤 نام: {display_name}\n"
+            f"🔗 نام کاربری: {username}\n"
+            f"🆔 آیدی عددی: {target_id}\n\n"
+            f"📝 متن درخواست:\n{body[:3500]}"
+        )
+        admin_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✉️ پیام دادن به مشتری از داخل ربات", callback_data=f"contact_reply:{target_id}")],
+            [InlineKeyboardButton("👤 رفتن به پیوی مشتری", url=f"tg://user?id={target_id}")],
+        ])
+        sent = 0
+        for admin_id in load_admin_ids():
+            try:
+                await context.bot.send_message(
+                    chat_id=admin_id, text=admin_text, reply_markup=admin_keyboard
+                )
+                sent += 1
+            except Exception:
+                logger.exception("Could not forward %s message from user %s to admin %s", contact_flow, user.id if user else None, admin_id)
+        context.user_data.pop("contact_flow", None)
+        if sent:
+            await update.message.reply_text(
+                "✅ درخواست شما ثبت و برای مدیریت ارسال شد. پاسخ پشتیبانی از همین ربات برایتان فرستاده می‌شود.",
+                reply_markup=MAIN_MARKUP,
+            )
+        else:
+            await update.message.reply_text(
+                "⚠️ پیام شما فعلاً به مدیریت نرسید. لطفاً کمی بعد دوباره تلاش کنید یا مستقیماً به پشتیبانی پیام بدهید.",
+                reply_markup=MAIN_MARKUP,
+            )
         return
 
     if await handle_config_text(update, context):
@@ -1294,8 +1610,12 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if txt == "🎮 شاپ اکانت بازی‌ها":
+        if not is_admin(update.effective_user.id) and await section_gate(update.message, "market"):
+            return
         await market_open(update, context)
     elif txt == "💎 خدمات مجازی":
+        if not is_admin(update.effective_user.id) and await section_gate(update.message, "virtual"):
+            return
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("💎 تلگرام پرمیوم — ۱ ماه | ۱٬۲۰۰٬۰۰۰ تومان", callback_data="virtual:0")],
             [InlineKeyboardButton("💎 تلگرام پرمیوم — ۳ ماه | ۳٬۹۰۰٬۰۰۰ تومان", callback_data="virtual:1")],
@@ -1306,10 +1626,14 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif txt == "🚀 خرید سرویس جدید":
         await begin_purchase(update, context)
     elif txt == "💰 تعرفه سرویس‌ها":
+        if not is_admin(update.effective_user.id) and await section_gate(update.message, "tariffs"):
+            return
         await show_tariffs(update, context)
     elif txt == "📱 سرویس‌های من":
         await my_orders(update, context)
     elif txt == "🧪 اکانت تست":
+        if not is_admin(update.effective_user.id) and await section_gate(update.message, "test"):
+            return
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🎁 دریافت اکانت تست رایگان", callback_data="test:request")],
             [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="global_back")],
@@ -1319,6 +1643,8 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=keyboard,
         )
     elif txt == "♻️ تمدید سرویس":
+        if not is_admin(update.effective_user.id) and await section_gate(update.message, "renew"):
+            return
         await my_orders(update, context)
     elif txt == "💡 آموزش استفاده":
         await update.message.reply_text("آموزش استفاده فعلاً در حال آماده‌سازی است.", reply_markup=MAIN_MARKUP)
@@ -1334,9 +1660,20 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=MAIN_MARKUP,
         )
     elif txt == "🧑🏻‍💻 تماس با پشتیبانی":
-        await update.message.reply_text("برای پشتیبانی، پیام خود را همین‌جا بنویسید.", reply_markup=MAIN_MARKUP)
+        context.user_data["contact_flow"] = "support"
+        await update.message.reply_text(
+            "🧑🏻‍💻 پیام خود را برای پشتیبانی بنویسید تا برای مدیریت ارسال شود.\n\n"
+            "برای لغو، کلمه «لغو» را بفرستید.",
+            reply_markup=MAIN_MARKUP,
+        )
     elif txt == "🤝 درخواست نمایندگی":
-        await update.message.reply_text("برای درخواست نمایندگی، با پشتیبانی تماس بگیرید.", reply_markup=MAIN_MARKUP)
+        context.user_data["contact_flow"] = "representative"
+        await update.message.reply_text(
+            "🤝 درخواست نمایندگی\n\n"
+            "لطفاً در یک پیام این اطلاعات را بنویسید: نام، شهر/کشور، روش جذب مشتری و سابقه فروش (در صورت وجود).\n\n"
+            "درخواست شما برای مدیریت ارسال می‌شود. برای لغو، کلمه «لغو» را بفرستید.",
+            reply_markup=MAIN_MARKUP,
+        )
 
 
 # ================= ONLINE GAME ACCOUNT MARKETPLACE =================
@@ -1452,6 +1789,8 @@ async def market_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def market_photo_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await handle_config_media(update, context):
+        return
     flow = context.user_data.get("market_flow")
     if flow and flow.get("step") == "photos" and update.message and update.message.photo:
         photos = flow.setdefault("photos", [])
@@ -1469,6 +1808,8 @@ async def market_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
     user = query.from_user
+    if not is_admin(user.id) and await section_gate(query.message, "market"):
+        return
     if data == "market:home":
         context.user_data.pop("market_flow", None)
         await query.message.reply_text("به منوی اصلی برگشتید.", reply_markup=MAIN_MARKUP)
@@ -1624,6 +1965,34 @@ async def setdiscount_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
     else:
         await update.effective_message.reply_text("✅ تخفیف غیرفعال شد؛ قیمت‌ها به حالت عادی برگشتند.")
+
+
+async def discount_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set or remove a discount for one customer only. /discount_user USER_ID PERCENT"""
+    if not is_admin(update.effective_user.id):
+        await update.effective_message.reply_text("⛔ این دستور فقط برای ادمین است.")
+        return
+    if len(context.args) != 2 or not context.args[0].isdigit() or not context.args[1].isdigit():
+        await update.effective_message.reply_text(
+            "فرمت دستور:\n/discount_user آیدی_مشتری درصد\n"
+            "مثال: /discount_user 6278794309 20\n"
+            "برای حذف تخفیف اختصاصی و برگشت به تخفیف عمومی: /discount_user 6278794309 0"
+        )
+        return
+    user_id, percent = int(context.args[0]), int(context.args[1])
+    if not 0 <= percent <= 100:
+        await update.effective_message.reply_text("درصد باید بین ۰ تا ۱۰۰ باشد.")
+        return
+    save_user_discount_percent(user_id, percent)
+    if percent:
+        await update.effective_message.reply_text(
+            f"✅ تخفیف اختصاصی {percent}٪ برای مشتری با آیدی {user_id} تنظیم شد.\n"
+            "این تخفیف فقط برای سفارش‌های جدید این مشتری اعمال می‌شود."
+        )
+    else:
+        await update.effective_message.reply_text(
+            f"✅ تخفیف اختصاصی مشتری {user_id} حذف شد؛ از این پس تخفیف عمومی برای او اعمال می‌شود."
+        )
 
 
 async def discount_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1979,46 +2348,16 @@ async def post_init(application: Application):
     application.bot_data["bot_username"] = me.username or ""
 
 
-def _start_health_server() -> None:
-    """Tiny HTTP endpoint on the platform port so Railway's health check passes.
-
-    python-telegram-bot's long polling opens no listening port, so without this
-    the platform sees no listener and may kill or restart the container.
-    Runs in a daemon thread because serve_forever() blocks.
-    """
-    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-    port = int(os.getenv("PORT", "8080"))
-
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802 (stdlib naming)
-            body = b"bot:polling\n"
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def log_message(self, *args):
-            return  # silence per-request logging noise
-
-    def _serve() -> None:
-        try:
-            ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
-        except Exception:
-            logger.exception("Health server failed to start (non-fatal)")
-
-    threading.Thread(target=_serve, daemon=True).start()
-
-
 def main():
     # Pydroid-friendly: if no token is configured, ask for it in the console.
     token = (BOT_TOKEN or "").strip()
     if not token or token == "PASTE_NEW_BOT_TOKEN_HERE":
-        # On Railway the container has no interactive console: fail fast and clearly.
-        raise SystemExit(
-            "BOT_TOKEN تنظیم نشده. در متغیرهای محیطی Railway مقدار BOT_TOKEN را اضافه کن."
-        )
+        print("توکن جدید ربات را از @BotFather کپی کن و اینجا وارد کن.")
+        print("توکن را در چت با هیچ‌کس به اشتراک نگذار؛ ورودی در کنسول نمایش داده می‌شود.")
+        try:
+            token = input("BOT_TOKEN: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            raise SystemExit("ورودی توکن لغو شد.")
     if not token:
         raise SystemExit("توکن خالی است. فایل را دوباره اجرا کن و توکن جدید را وارد کن.")
     if ":" not in token or len(token) < 30:
@@ -2031,6 +2370,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("broadcast", broadcast_command))
     app.add_handler(CommandHandler(["senduser", "send_user"], senduser_command))
+    app.add_handler(CommandHandler("cancelreply", cancel_reply_command))
     app.add_handler(CommandHandler("block", block_command))
     app.add_handler(CommandHandler("unblock", unblock_command))
     app.add_handler(CommandHandler("ban", ban_command))
@@ -2041,6 +2381,7 @@ def main():
     app.add_handler(CommandHandler("removeadmin", removeadmin_command))
     app.add_handler(CommandHandler("admins", admins_command))
     app.add_handler(CommandHandler("setdiscount", setdiscount_command))
+    app.add_handler(CommandHandler("discount_user", discount_user_command))
     app.add_handler(CommandHandler("discount", discount_command))
     app.add_handler(CommandHandler("secretary", secretary_command))
     app.add_handler(CommandHandler("mode", mode_command))
@@ -2055,6 +2396,10 @@ def main():
     app.add_handler(CommandHandler("sendconfig", sendconfig_command))
     app.add_handler(CommandHandler("test_add", test_add_command))
     app.add_handler(CommandHandler("test_list", test_list_command))
+    app.add_handler(CommandHandler("section_close", section_close_command))
+    app.add_handler(CommandHandler("section_open", section_open_command))
+    app.add_handler(CommandHandler("sections", sections_command))
+    app.add_handler(CallbackQueryHandler(contact_reply_callback, pattern=r"^contact_reply:\d+$"))
     app.add_handler(CallbackQueryHandler(global_back_callback, pattern=r"^global_back$"))
     app.add_handler(CallbackQueryHandler(test_request_callback, pattern=r"^test:request$"))
     app.add_handler(CallbackQueryHandler(cancel_active_order_callback, pattern=r"^cancel_active_order:\d+$"))
@@ -2065,14 +2410,12 @@ def main():
     app.add_handler(CallbackQueryHandler(market_callback, pattern=r"^market:"))
     app.add_handler(CallbackQueryHandler(virtual_service_callback, pattern=r"^virtual:\d+$"))
     app.add_handler(MessageHandler(filters.PHOTO, market_photo_input))
+    app.add_handler(MessageHandler(filters.VIDEO | filters.Document.ALL, handle_config_media))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu_text))
     # Telegram Business updates are separate from normal bot-chat updates.
     app.add_handler(TypeHandler(Update, business_connection_update), group=1)
     app.add_handler(TypeHandler(Update, business_message_handler), group=2)
     app.add_error_handler(error_handler)
-
-    # Railway exposes exactly one port; the health server must run beside polling.
-    _start_health_server()
 
     print("Bot is running. Stop with Ctrl+C or the stop button in Pydroid.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
