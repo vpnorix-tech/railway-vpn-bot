@@ -1075,37 +1075,51 @@ async def review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def sendconfig_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("این دستور فقط برای ادمین است.")
+    """Select an approved order for manual config delivery.
+
+    Usage: /sendconfig <order_id> [customer_numeric_id]. The customer ID is
+    optional; if supplied, it is validated against the stored order.
+    """
+    if not update.effective_user or not is_admin(update.effective_user.id):
+        await update.effective_message.reply_text("این دستور فقط برای ادمین است.")
         return
-    if len(context.args) != 2:
-        await update.message.reply_text(
-            "فرمت درست:\n/sendconfig شماره_سفارش آیدی_عددی_مشتری\n"
-            "مثال: /sendconfig 1001 123456789"
+    if len(context.args) not in (1, 2):
+        await update.effective_message.reply_text(
+            "فرمت دستور:\n/sendconfig شماره_سفارش [آیدی_عددی_مشتری]\n"
+            "مثال: /sendconfig 1001\n"
+            "پس از اجرای دستور، متن یا فایل کانفیگ را ارسال کنید."
         )
         return
     try:
         order_id = str(int(context.args[0]))
-        customer_id = int(context.args[1])
+        customer_id = int(context.args[1]) if len(context.args) == 2 else None
     except ValueError:
-        await update.message.reply_text("شماره سفارش و آیدی مشتری باید عدد باشند.")
+        await update.effective_message.reply_text("شماره سفارش و آیدی مشتری باید عدد باشند.")
         return
     db = load_db()
-    order = db["orders"].get(order_id)
+    order = db.get("orders", {}).get(order_id)
     if not order:
-        await update.message.reply_text("شماره سفارش پیدا نشد.")
+        await update.effective_message.reply_text("شماره سفارش پیدا نشد.")
         return
-    if order["status"] != "رسید تأییدشده؛ در انتظار کانفیگ":
-        await update.message.reply_text("این سفارش تأیید نشده یا قبلاً تحویل داده شده است.")
+    if order.get("status") != "رسید تأییدشده؛ در انتظار کانفیگ":
+        await update.effective_message.reply_text(
+            f"این سفارش آماده تحویل کانفیگ نیست. وضعیت فعلی: {order.get('status', 'نامشخص')}"
+        )
         return
-    if order["user_id"] != customer_id:
-        await update.message.reply_text(
-            f"آیدی مشتری با سفارش مطابقت ندارد.\nآیدی درست این سفارش: {order['user_id']}"
+    stored_customer_id = order.get("user_id")
+    if customer_id is not None and str(stored_customer_id) != str(customer_id):
+        await update.effective_message.reply_text(
+            f"آیدی مشتری با سفارش مطابقت ندارد. آیدی درست: {stored_customer_id}"
         )
         return
     context.user_data["config_order_id"] = order_id
-    await update.message.reply_text(
-        f"حالا متن کانفیگ سفارش #{order_id} را در پیام بعدی بفرست."
+    context.user_data.pop("pending_config_delivery", None)
+    await update.effective_message.reply_text(
+        f"✅ سفارش #{order.get('order_number', order_id)} انتخاب شد.\n"
+        f"👤 مشتری: {order.get('customer_name', '—')} | 🆔 {stored_customer_id}\n"
+        f"📦 سرویس: {order.get('panel', '—')} — {order.get('product', '—')}\n\n"
+        "حالا متن کانفیگ یا فایل WireGuard/V2Ray را در پیام بعدی بفرستید. "
+        "سپس دکمه «ارسال به پیوی مشتری» را بزنید."
     )
 
 
@@ -1208,7 +1222,7 @@ async def config_delivery_callback(update: Update, context: ContextTypes.DEFAULT
         return
 
     db = load_db()
-    order = db.get("orders", {}).get(order_id)
+    order = db.get("orders", {}).get(str(order_id))
     if not order or order.get("status") != "رسید تأییدشده؛ در انتظار کانفیگ":
         context.user_data.pop("pending_config_delivery", None)
         await query.message.reply_text("این سفارش دیگر آماده تحویل نیست.")
@@ -1633,6 +1647,11 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     txt = (update.message.text or "").strip()
 
+    # Important: prioritize an admin's staged config delivery before customer flows
+    # (service naming, support, quantities, etc.) can intercept the message.
+    if await handle_config_text(update, context):
+        return
+
     if context.user_data.get("service_name_waiting"):
         if txt in ("❌ لغو خرید", "لغو"):
             context.user_data.pop("service_name_waiting", None)
@@ -1725,8 +1744,6 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
-    if await handle_config_text(update, context):
-        return
     if await handle_quantity(update, context):
         return
 
