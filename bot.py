@@ -1471,6 +1471,37 @@ async def test_request_callback(update: Update, context: ContextTypes.DEFAULT_TY
             logger.exception("Could not notify admin about test claim")
 
 
+async def contact_reply_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Let an admin choose a customer and then reply by typing only the message."""
+    query = update.callback_query
+    if not query:
+        return
+    actor = query.from_user
+    if not is_admin(actor.id):
+        await query.answer("این گزینه فقط برای ادمین است.", show_alert=True)
+        return
+    await query.answer()
+    try:
+        target_id = int((query.data or "").split(":", 1)[1])
+    except (IndexError, ValueError):
+        await query.message.reply_text("آیدی مشتری معتبر نیست.")
+        return
+    context.user_data["reply_to_user_id"] = target_id
+    await query.message.reply_text(
+        f"✍️ پاسخ به مشتری با آیدی {target_id} انتخاب شد.\n\n"
+        "حالا فقط متن پیام را بفرست؛ ربات آن را برای مشتری ارسال می‌کند.\n"
+        "برای لغو، /cancelreply را بزن."
+    )
+
+
+async def cancel_reply_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin(update.effective_user.id):
+        await update.effective_message.reply_text("⛔ این دستور فقط برای ادمین است.")
+        return
+    context.user_data.pop("reply_to_user_id", None)
+    await update.effective_message.reply_text("پاسخ‌گویی لغو شد.")
+
+
 async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.business_message:
         return
@@ -1479,6 +1510,28 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await access_gate(update, context):
         return
     txt = (update.message.text or "").strip()
+
+    # If an admin selected “پیام دادن به مشتری”, their next text is sent directly.
+    reply_target = context.user_data.get("reply_to_user_id")
+    if reply_target and update.effective_user and is_admin(update.effective_user.id):
+        if txt in ("لغو", "انصراف", "/cancelreply"):
+            context.user_data.pop("reply_to_user_id", None)
+            await update.message.reply_text("پاسخ‌گویی لغو شد.")
+            return
+        try:
+            await context.bot.send_message(chat_id=int(reply_target), text=txt)
+        except Forbidden:
+            await update.message.reply_text(
+                "❌ پیام ارسال نشد؛ احتمالاً مشتری ربات را شروع نکرده یا ربات را مسدود کرده است."
+            )
+        except TelegramError:
+            logger.exception("Could not send admin reply to user %s", reply_target)
+            await update.message.reply_text("❌ ارسال پیام ناموفق بود. خطا در گزارش ربات ثبت شد.")
+        else:
+            await update.message.reply_text(f"✅ پیام برای مشتری {reply_target} ارسال شد.")
+        finally:
+            context.user_data.pop("reply_to_user_id", None)
+        return
 
     if txt in ("🔙 منوی اصلی", "🔙 بازگشت به منوی اصلی"):
         # If the user is in the payment/receipt stage, treat going back as cancelling that order.
@@ -1514,18 +1567,24 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             subject = "🤝 درخواست جدید نمایندگی"
             body = txt
+        target_id = user.id if user else 0
         admin_text = (
             f"{subject}\n\n"
             f"👤 نام: {display_name}\n"
             f"🔗 نام کاربری: {username}\n"
-            f"🆔 آیدی عددی: {user.id if user else 'نامشخص'}\n\n"
-            f"📝 متن درخواست:\n{body[:3500]}\n\n"
-            f"برای پاسخ: /senduser {user.id if user else 0} متن پیام"
+            f"🆔 آیدی عددی: {target_id}\n\n"
+            f"📝 متن درخواست:\n{body[:3500]}"
         )
+        admin_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✉️ پیام دادن به مشتری از داخل ربات", callback_data=f"contact_reply:{target_id}")],
+            [InlineKeyboardButton("👤 رفتن به پیوی مشتری", url=f"tg://user?id={target_id}")],
+        ])
         sent = 0
         for admin_id in load_admin_ids():
             try:
-                await context.bot.send_message(chat_id=admin_id, text=admin_text)
+                await context.bot.send_message(
+                    chat_id=admin_id, text=admin_text, reply_markup=admin_keyboard
+                )
                 sent += 1
             except Exception:
                 logger.exception("Could not forward %s message from user %s to admin %s", contact_flow, user.id if user else None, admin_id)
@@ -2311,6 +2370,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("broadcast", broadcast_command))
     app.add_handler(CommandHandler(["senduser", "send_user"], senduser_command))
+    app.add_handler(CommandHandler("cancelreply", cancel_reply_command))
     app.add_handler(CommandHandler("block", block_command))
     app.add_handler(CommandHandler("unblock", unblock_command))
     app.add_handler(CommandHandler("ban", ban_command))
@@ -2339,6 +2399,7 @@ def main():
     app.add_handler(CommandHandler("section_close", section_close_command))
     app.add_handler(CommandHandler("section_open", section_open_command))
     app.add_handler(CommandHandler("sections", sections_command))
+    app.add_handler(CallbackQueryHandler(contact_reply_callback, pattern=r"^contact_reply:\d+$"))
     app.add_handler(CallbackQueryHandler(global_back_callback, pattern=r"^global_back$"))
     app.add_handler(CallbackQueryHandler(test_request_callback, pattern=r"^test:request$"))
     app.add_handler(CallbackQueryHandler(cancel_active_order_callback, pattern=r"^cancel_active_order:\d+$"))
