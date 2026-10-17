@@ -917,6 +917,9 @@ async def wallet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if request.get("status") != "pending":
             await query.message.reply_text("این درخواست قبلاً بررسی شده است."); return
         uid = str(request["user_id"]); amount = int(request["amount"])
+        if not request.get("receipt_file_id"):
+            await query.message.reply_text("❌ برای این درخواست رسید پرداخت ثبت نشده؛ شارژ انجام نشد.")
+            return
         if decision == "approve":
             wallet["balances"][uid] = wallet_balance(wallet, uid) + amount
             request["status"] = "approved"
@@ -1745,6 +1748,7 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("wallet_topup_waiting"):
         if txt in ("لغو", "انصراف", "❌ لغو"):
             context.user_data.pop("wallet_topup_waiting", None)
+            context.user_data.pop("wallet_topup_amount", None)
             await update.message.reply_text("درخواست شارژ لغو شد.", reply_markup=MAIN_MARKUP); return
         raw_amount = normalize_digits(txt).replace(",", "").replace("٬", "").replace(" ", "")
         if not raw_amount.isdigit():
@@ -1752,16 +1756,24 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         amount = int(raw_amount)
         if amount < 10000 or amount > 100000000:
             await update.message.reply_text("مبلغ شارژ باید بین ۱۰٬۰۰۰ تا ۱۰۰٬۰۰۰٬۰۰۰ تومان باشد."); return
-        wallet = load_wallet(); request_id = int(wallet.get("next_request_id", 1)); wallet["next_request_id"] = request_id + 1
-        wallet["requests"][str(request_id)] = {"id": request_id, "user_id": update.effective_user.id, "amount": amount, "status": "pending", "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-        save_wallet(wallet); context.user_data.pop("wallet_topup_waiting", None)
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✅ تأیید شارژ", callback_data=f"wallet:review:approve:{request_id}"), InlineKeyboardButton("❌ رد درخواست", callback_data=f"wallet:review:reject:{request_id}")]])
-        sent = 0
-        for admin_id in load_admin_ids():
-            try:
-                await context.bot.send_message(chat_id=admin_id, text=f"💰 درخواست شارژ اعتبار #{request_id}\n👤 مشتری: {update.effective_user.full_name}\n🆔 آیدی: {update.effective_user.id}\n💵 مبلغ درخواستی: {money(amount)}\n\nپس از بررسی پرداخت، تأیید یا رد کنید.", reply_markup=keyboard); sent += 1
-            except Exception: logger.exception("Could not send wallet top-up request to admin %s", admin_id)
-        await update.message.reply_text("✅ درخواست شارژ برای ادمین ارسال شد؛ پس از بررسی، نتیجه اعلام می‌شود." if sent else "⚠️ درخواست ثبت شد، اما پیام به ادمین نرسید.", reply_markup=MAIN_MARKUP); return
+        context.user_data["wallet_topup_amount"] = amount
+        context.user_data.pop("wallet_topup_waiting", None)
+        context.user_data["wallet_topup_receipt_waiting"] = True
+        await update.message.reply_text(
+            f"💰 مبلغ درخواستی: {money(amount)} تومان\n\n"
+            "حالا مبلغ را به کارت اعلام‌شده در بخش پرداخت واریز کنید و سپس عکس رسید واریز را همین‌جا ارسال کنید.\n"
+            "بعد از ارسال رسید، درخواست برای ادمین می‌رود تا پرداخت را بررسی و تأیید یا رد کند.\n\n"
+            "برای لغو بنویسید: لغو",
+            reply_markup=ReplyKeyboardMarkup([["❌ لغو"]], resize_keyboard=True),
+        )
+        return
+    if context.user_data.get("wallet_topup_receipt_waiting"):
+        if txt in ("لغو", "انصراف", "❌ لغو"):
+            context.user_data.pop("wallet_topup_receipt_waiting", None)
+            context.user_data.pop("wallet_topup_amount", None)
+            await update.message.reply_text("درخواست شارژ لغو شد.", reply_markup=MAIN_MARKUP); return
+        await update.message.reply_text("لطفاً عکس رسید واریز را به‌صورت تصویر ارسال کنید؛ یا برای لغو بنویسید «لغو».")
+        return
 
     # Important: prioritize an admin's staged config delivery before customer flows
     # (service naming, support, quantities, etc.) can intercept the message.
@@ -2052,6 +2064,46 @@ async def market_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def market_photo_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Wallet top-up receipt must be handled before config/media flows.
+    if context.user_data.get("wallet_topup_receipt_waiting") and update.message and update.message.photo:
+        amount = int(context.user_data.get("wallet_topup_amount", 0) or 0)
+        if amount < 10000:
+            context.user_data.pop("wallet_topup_receipt_waiting", None)
+            context.user_data.pop("wallet_topup_amount", None)
+            await update.message.reply_text("درخواست شارژ منقضی شده است؛ لطفاً دوباره از بخش اعتبار من شروع کنید.")
+            return
+        user = update.effective_user
+        wallet = load_wallet()
+        request_id = int(wallet.get("next_request_id", 1))
+        wallet["next_request_id"] = request_id + 1
+        receipt_file_id = update.message.photo[-1].file_id
+        request = {
+            "id": request_id, "user_id": user.id, "amount": amount,
+            "status": "pending", "receipt_file_id": receipt_file_id,
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        wallet.setdefault("requests", {})[str(request_id)] = request
+        save_wallet(wallet)
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✅ تأیید شارژ", callback_data=f"wallet:review:approve:{request_id}"), InlineKeyboardButton("❌ رد درخواست", callback_data=f"wallet:review:reject:{request_id}")]])
+        sent = 0
+        caption = (f"💰 درخواست شارژ اعتبار #{request_id}\n"
+                   f"👤 مشتری: {user.full_name}\n🆔 آیدی: {user.id}\n"
+                   f"💵 مبلغ درخواستی: {money(amount)} تومان\n\n"
+                   "📸 رسید پرداخت مشتری؛ لطفاً تصویر و مبلغ را بررسی کنید.")
+        for admin_id in load_admin_ids():
+            try:
+                await context.bot.send_photo(chat_id=admin_id, photo=receipt_file_id, caption=caption, reply_markup=keyboard)
+                sent += 1
+            except Exception:
+                logger.exception("Could not send wallet top-up receipt to admin %s", admin_id)
+        context.user_data.pop("wallet_topup_receipt_waiting", None)
+        context.user_data.pop("wallet_topup_amount", None)
+        if sent:
+            await update.message.reply_text("✅ رسید واریز دریافت و برای ادمین ارسال شد. پس از بررسی رسید، اعتبار شما تأیید یا رد می‌شود.", reply_markup=MAIN_MARKUP)
+        else:
+            # Keep the request pending for retry/administrator visibility; inform customer clearly.
+            await update.message.reply_text("⚠️ رسید ثبت شد، اما ارسال آن برای ادمین ناموفق بود. لطفاً با پشتیبانی تماس بگیرید و دوباره درخواست نسازید.", reply_markup=MAIN_MARKUP)
+        return
     if await handle_config_media(update, context):
         return
     flow = context.user_data.get("market_flow")
