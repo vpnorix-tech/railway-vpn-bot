@@ -47,6 +47,7 @@ USERS_FILE = Path(__file__).with_name("users.json")
 ACCESS_FILE = Path(__file__).with_name("access_settings.json")
 SECTION_FILE = Path(__file__).with_name("section_settings.json")
 TEST_FILE = Path(__file__).with_name("test_accounts.json")
+WALLET_FILE = Path(__file__).with_name("wallet.json")
 # Serializes test-pool updates so two nearly simultaneous requests cannot take the same link.
 TEST_ACCOUNTS_LOCK = asyncio.Lock()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
@@ -161,6 +162,41 @@ def save_db(data):
     with tmp.open("w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     tmp.replace(DB_FILE)
+
+
+def load_wallet():
+    """Persistent wallet balances and top-up requests, independent from orders.json."""
+    if not WALLET_FILE.exists():
+        return {"balances": {}, "requests": {}, "next_request_id": 1, "transactions": []}
+    try:
+        with WALLET_FILE.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        data.setdefault("balances", {})
+        data.setdefault("requests", {})
+        data.setdefault("next_request_id", 1)
+        data.setdefault("transactions", [])
+        return data
+    except Exception:
+        logger.exception("Could not read wallet.json")
+        raise RuntimeError("فایل wallet.json قابل خواندن نیست؛ برای جلوگیری از از دست رفتن اعتبار، آن را پاک نکنید.")
+
+
+def save_wallet(data):
+    tmp = WALLET_FILE.with_suffix(".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    tmp.replace(WALLET_FILE)
+
+
+def wallet_balance(data, user_id):
+    try:
+        return max(0, int(data.get("balances", {}).get(str(user_id), 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def normalize_digits(value):
+    return str(value).translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))
 
 
 def money(amount):
@@ -864,6 +900,82 @@ async def handle_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=ReplyKeyboardMarkup([["❌ لغو خرید"]], resize_keyboard=True),
     )
     return True
+
+
+async def wallet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    data = query.data or ""
+    user = query.from_user
+    if data.startswith("wallet:review:"):
+        if not is_admin(user.id):
+            await query.answer("فقط ادمین اجازه بررسی درخواست را دارد.", show_alert=True); return
+        await query.answer()
+        _, _, decision, request_id = data.split(":", 3)
+        wallet = load_wallet(); request = wallet.get("requests", {}).get(request_id)
+        if not request:
+            await query.message.reply_text("درخواست شارژ پیدا نشد."); return
+        if request.get("status") != "pending":
+            await query.message.reply_text("این درخواست قبلاً بررسی شده است."); return
+        uid = str(request["user_id"]); amount = int(request["amount"])
+        if decision == "approve":
+            wallet["balances"][uid] = wallet_balance(wallet, uid) + amount
+            request["status"] = "approved"
+            wallet.setdefault("transactions", []).append({"user_id": int(uid), "type": "topup", "amount": amount, "request_id": request_id, "by": user.id, "at": datetime.now().isoformat(timespec="seconds")})
+            save_wallet(wallet)
+            await context.bot.send_message(chat_id=int(uid), text=f"✅ درخواست شارژ تأیید شد.\n💰 مبلغ: {money(amount)}\n💳 اعتبار فعلی: {money(wallet_balance(wallet, uid))}")
+            await query.message.reply_text(f"✅ شارژ درخواست #{request_id} تأیید شد.")
+        elif decision == "reject":
+            request["status"] = "rejected"; request["reviewed_by"] = user.id; save_wallet(wallet)
+            await context.bot.send_message(chat_id=int(uid), text=f"❌ درخواست شارژ {money(amount)} رد شد. برای پیگیری با پشتیبانی تماس بگیرید.")
+            await query.message.reply_text(f"درخواست شارژ #{request_id} رد شد.")
+        try: await query.edit_message_reply_markup(reply_markup=None)
+        except TelegramError: pass
+        return
+    if data == "wallet:topup":
+        await query.answer(); context.user_data["wallet_topup_waiting"] = True
+        await query.message.reply_text("💳 مبلغ شارژ را به تومان وارد کنید.\nمثال: 100000\nحداقل شارژ ۱۰٬۰۰۰ تومان است. برای لغو بنویسید: لغو")
+        return
+    if data == "wallet:pay":
+        await query.answer(); pending = context.user_data.get("pending_order")
+        if not pending:
+            await query.message.reply_text("سفارش فعالی پیدا نشد؛ خرید را دوباره شروع کنید."); return
+        amount = int(pending.get("amount", 0)); wallet = load_wallet(); uid = str(user.id); balance = wallet_balance(wallet, uid)
+        if amount <= 0:
+            await query.message.reply_text("مبلغ سفارش نامعتبر است."); return
+        if balance < amount:
+            await query.message.reply_text(f"اعتبار کافی نیست.\n💳 اعتبار فعلی: {money(balance)}\n🧾 مبلغ سفارش: {money(amount)}\nلطفاً اعتبار را شارژ کنید یا پرداخت با رسید را انتخاب کنید."); return
+        db = load_db(); order_id = db["next_id"]; db["next_id"] += 1
+        order_number = 1 + max((int(o.get("order_number", 0)) for o in db["orders"].values()), default=0)
+        order = {"id": order_id, "order_number": order_number, "user_id": user.id,
+            "customer_name": " ".join(x for x in [user.first_name, user.last_name] if x) or "بدون نام",
+            "username": f"@{user.username}" if user.username else "ندارد", **pending,
+            "status": "رسید تأییدشده؛ در انتظار کانفیگ", "receipt_file_id": None,
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "reviewed_by": "wallet", "config_sent": False, "payment_method": "wallet"}
+        db["orders"][str(order_id)] = order; save_db(db)
+        wallet["balances"][uid] = balance - amount
+        wallet.setdefault("transactions", []).append({"user_id": user.id, "type": "purchase", "amount": -amount, "order_id": order_id, "at": datetime.now().isoformat(timespec="seconds")}); save_wallet(wallet)
+        context.user_data.pop("pending_order", None); context.user_data.pop("service_name_waiting", None)
+        await query.message.reply_text(f"✅ خرید با اعتبار انجام شد.\n🧾 سفارش: #{order_number}\n💸 مبلغ کسرشده: {money(amount)}\n💳 اعتبار باقی‌مانده: {money(balance-amount)}\n\nکانفیگ پس از آماده‌سازی توسط مدیریت ارسال می‌شود.", reply_markup=MAIN_MARKUP)
+        for admin_id in load_admin_ids():
+            try:
+                await context.bot.send_message(chat_id=admin_id, text=f"🛒 سفارش پرداخت‌شده با اعتبار\nسفارش: #{order_number} (شناسه داخلی {order_id})\nمشتری: {order['customer_name']}\nآیدی: {user.id}\nسرویس: {order.get('panel')} — {order.get('product')}\nنام انتخابی: {order.get('service_name', '—')}\nمبلغ: {money(amount)}\n\nبرای تحویل: /sendconfig {order_id}")
+            except Exception: logger.exception("Could not notify admin about wallet purchase")
+
+
+async def wallet_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.effective_message.reply_text("این دستور فقط برای ادمین است."); return
+    args = context.args
+    if len(args) < 2 or not args[0].isdigit() or not normalize_digits(args[1]).isdigit():
+        await update.effective_message.reply_text("فرمت: /wallet_add آیدی_مشتری مبلغ_تومان [توضیح]\nمثال: /wallet_add 123456789 50000 هدیه"); return
+    uid, amount = int(args[0]), int(normalize_digits(args[1]))
+    if amount <= 0:
+        await update.effective_message.reply_text("مبلغ باید بیشتر از صفر باشد."); return
+    wallet = load_wallet(); wallet["balances"][str(uid)] = wallet_balance(wallet, uid) + amount
+    wallet.setdefault("transactions", []).append({"user_id": uid, "type": "admin_add", "amount": amount, "by": update.effective_user.id, "note": " ".join(args[2:])[:200], "at": datetime.now().isoformat(timespec="seconds")}); save_wallet(wallet)
+    await update.effective_message.reply_text(f"✅ اعتبار کاربر {uid} به اندازه {money(amount)} افزایش یافت.\n💳 اعتبار جدید: {money(wallet_balance(wallet, uid))}")
+    try: await context.bot.send_message(chat_id=uid, text=f"🎁 مدیریت برای شما اعتبار شارژ کرد.\n➕ مبلغ: {money(amount)}\n💳 اعتبار فعلی: {money(wallet_balance(wallet, uid))}")
+    except TelegramError: await update.effective_message.reply_text("اعتبار ثبت شد؛ اما اطلاع‌رسانی به مشتری انجام نشد.")
 
 
 async def order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1630,6 +1742,27 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     txt = (update.message.text or "").strip()
 
+    if context.user_data.get("wallet_topup_waiting"):
+        if txt in ("لغو", "انصراف", "❌ لغو"):
+            context.user_data.pop("wallet_topup_waiting", None)
+            await update.message.reply_text("درخواست شارژ لغو شد.", reply_markup=MAIN_MARKUP); return
+        raw_amount = normalize_digits(txt).replace(",", "").replace("٬", "").replace(" ", "")
+        if not raw_amount.isdigit():
+            await update.message.reply_text("مبلغ را فقط با عدد وارد کنید؛ مثال: 100000"); return
+        amount = int(raw_amount)
+        if amount < 10000 or amount > 100000000:
+            await update.message.reply_text("مبلغ شارژ باید بین ۱۰٬۰۰۰ تا ۱۰۰٬۰۰۰٬۰۰۰ تومان باشد."); return
+        wallet = load_wallet(); request_id = int(wallet.get("next_request_id", 1)); wallet["next_request_id"] = request_id + 1
+        wallet["requests"][str(request_id)] = {"id": request_id, "user_id": update.effective_user.id, "amount": amount, "status": "pending", "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        save_wallet(wallet); context.user_data.pop("wallet_topup_waiting", None)
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✅ تأیید شارژ", callback_data=f"wallet:review:approve:{request_id}"), InlineKeyboardButton("❌ رد درخواست", callback_data=f"wallet:review:reject:{request_id}")]])
+        sent = 0
+        for admin_id in load_admin_ids():
+            try:
+                await context.bot.send_message(chat_id=admin_id, text=f"💰 درخواست شارژ اعتبار #{request_id}\n👤 مشتری: {update.effective_user.full_name}\n🆔 آیدی: {update.effective_user.id}\n💵 مبلغ درخواستی: {money(amount)}\n\nپس از بررسی پرداخت، تأیید یا رد کنید.", reply_markup=keyboard); sent += 1
+            except Exception: logger.exception("Could not send wallet top-up request to admin %s", admin_id)
+        await update.message.reply_text("✅ درخواست شارژ برای ادمین ارسال شد؛ پس از بررسی، نتیجه اعلام می‌شود." if sent else "⚠️ درخواست ثبت شد، اما پیام به ادمین نرسید.", reply_markup=MAIN_MARKUP); return
+
     # Important: prioritize an admin's staged config delivery before customer flows
     # (service naming, support, quantities, etc.) can intercept the message.
     if await handle_config_text(update, context):
@@ -1659,7 +1792,8 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{discount_line}💵 مبلغ قابل پرداخت: {money(pending['amount'])}\n\n"
             "💳 پس از ثبت سفارش، عکس رسید پرداخت را ارسال کنید.",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ ثبت سفارش و ارسال رسید", callback_data="confirm_order")],
+                [InlineKeyboardButton("💳 پرداخت با اعتبار من", callback_data="wallet:pay")],
+                [InlineKeyboardButton("✅ پرداخت با رسید بانکی", callback_data="confirm_order")],
                 [InlineKeyboardButton("❌ لغو خرید", callback_data="cancel_order")],
             ]),
         )
@@ -1773,7 +1907,12 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif txt == "💡 آموزش استفاده":
         await update.message.reply_text("آموزش استفاده فعلاً در حال آماده‌سازی است.", reply_markup=MAIN_MARKUP)
     elif txt == "💰 اعتبار من":
-        await update.message.reply_text("اعتبار داخلی در این نسخه فعال نیست؛ پرداخت با رسید انجام می‌شود.", reply_markup=MAIN_MARKUP)
+        wallet = load_wallet()
+        balance = wallet_balance(wallet, update.effective_user.id)
+        await update.message.reply_text(
+            f"💰 کیف پول شما\n\n💳 اعتبار فعلی: {money(balance)}\n\nبرای شارژ، مبلغ دلخواه را وارد کنید. درخواست شما برای ادمین ارسال می‌شود و پس از تأیید پرداخت، اعتبار اضافه خواهد شد.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ شارژ اعتبار", callback_data="wallet:topup")]])
+        )
     elif txt == "🎗️ کاربران برتر":
         await update.message.reply_text("فهرست کاربران برتر فعلاً در دسترس نیست.", reply_markup=MAIN_MARKUP)
     elif txt == "👥 معرفی به دوستان":
@@ -2517,6 +2656,8 @@ def main():
     app.add_handler(CommandHandler("resume", pause_resume_command))
     app.add_handler(CommandHandler("orders", admin_orders))
     app.add_handler(CommandHandler("sendconfig", sendconfig_command))
+    app.add_handler(CommandHandler("wallet_add", wallet_admin_command))
+    app.add_handler(CallbackQueryHandler(wallet_callback, pattern=r"^wallet:"))
     app.add_handler(CommandHandler("test_add", test_add_command))
     app.add_handler(CommandHandler("test_list", test_list_command))
     app.add_handler(CommandHandler("section_close", section_close_command))
