@@ -9,7 +9,6 @@ import json
 import logging
 import os
 import asyncio
-import threading
 import urllib.request
 import urllib.error
 from datetime import datetime
@@ -38,28 +37,15 @@ from telegram.ext import (
 # Set these in your environment or replace BOT_TOKEN locally with a NEW token.
 # The token previously included in the uploaded file should be revoked in @BotFather.
 BOT_TOKEN = os.getenv("BOT_TOKEN", "PASTE_NEW_BOT_TOKEN_HERE")
-
-# Required: no hardcoded fallback. A default admin ID would silently route
-# another operator's admin notifications (orders, receipts, broadcasts) to a
-# stranger's Telegram account, so this must fail loudly when unset.
-_raw_admin_id = os.getenv("ADMIN_ID", "").strip()
-if not _raw_admin_id.isdigit():
-    raise SystemExit(
-        "ADMIN_ID تنظیم نشده. شناسه عددی تلگرام مدیر اصلی را در متغیرهای محیطی "
-        "قرار بده (می‌توانی از @userinfobot یا @getmyid_bot بگیری)."
-    )
-ADMIN_ID = int(_raw_admin_id)
-DB_FILE = (_DATA_DIR := Path(os.getenv("DATA_DIR") or Path(__file__).parent)) / "orders.json"
-MARKET_FILE = _DATA_DIR / "game_account_listings.json"
-SECRETARY_FILE = _DATA_DIR / "secretary_settings.json"
-ADMINS_FILE = _DATA_DIR / "admins.json"
-DISCOUNT_FILE = _DATA_DIR / "discount_settings.json"
-USERS_FILE = _DATA_DIR / "users.json"
-ACCESS_FILE = _DATA_DIR / "access_settings.json"
-TEST_FILE = _DATA_DIR / "test_accounts.json"
-# The container filesystem is replaced on every redeploy, so DATA_DIR must point
-# at a mounted volume for orders, users, and settings to survive.
-_DATA_DIR.mkdir(parents=True, exist_ok=True)
+ADMIN_ID = int(os.getenv("ADMIN_ID", "8928341236"))
+DB_FILE = Path(__file__).with_name("orders.json")
+MARKET_FILE = Path(__file__).with_name("game_account_listings.json")
+SECRETARY_FILE = Path(__file__).with_name("secretary_settings.json")
+ADMINS_FILE = Path(__file__).with_name("admins.json")
+DISCOUNT_FILE = Path(__file__).with_name("discount_settings.json")
+USERS_FILE = Path(__file__).with_name("users.json")
+ACCESS_FILE = Path(__file__).with_name("access_settings.json")
+TEST_FILE = Path(__file__).with_name("test_accounts.json")
 # Serializes test-pool updates so two nearly simultaneous requests cannot take the same link.
 TEST_ACCOUNTS_LOCK = asyncio.Lock()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
@@ -185,6 +171,43 @@ def save_discount_percent(percent):
     tmp = DISCOUNT_FILE.with_suffix(".tmp")
     with tmp.open("w", encoding="utf-8") as f:
         json.dump({"percent": int(percent)}, f, ensure_ascii=False, indent=2)
+    tmp.replace(DISCOUNT_FILE)
+
+
+def load_user_discount_percent(user_id):
+    """Return a customer-specific discount if set, otherwise the global discount."""
+    try:
+        if DISCOUNT_FILE.exists():
+            with DISCOUNT_FILE.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            users = data.get("users", {})
+            key = str(int(user_id))
+            if key in users:
+                return max(0, min(100, int(users[key])))
+    except Exception:
+        logger.exception("Could not read customer discounts")
+    return load_discount_percent()
+
+
+def save_user_discount_percent(user_id, percent):
+    """Persist a customer-specific discount while preserving the global setting."""
+    data = {}
+    if DISCOUNT_FILE.exists():
+        try:
+            with DISCOUNT_FILE.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+    data.setdefault("percent", 0)
+    data.setdefault("users", {})
+    key = str(int(user_id))
+    if int(percent) == 0:
+        data["users"].pop(key, None)
+    else:
+        data["users"][key] = int(percent)
+    tmp = DISCOUNT_FILE.with_suffix(".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
     tmp.replace(DISCOUNT_FILE)
 
 
@@ -495,7 +518,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def show_tariffs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    percent = load_discount_percent()
+    percent = load_user_discount_percent(update.effective_user.id)
     lines = ["💰 تعرفه سرویس‌ها\n"]
     if percent:
         lines.append(f"🏷 تخفیف فعال: {percent}٪\n")
@@ -540,7 +563,7 @@ async def panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("گزینه نامعتبر است.")
             return
         context.user_data["panel"] = panels[idx]
-        percent = load_discount_percent()
+        percent = load_user_discount_percent(query.from_user.id)
         keyboard = [
             [InlineKeyboardButton(
                 f"{name} — {money(discounted_price(price, percent))}" + (f" (تخفیف {percent}٪)" if percent else ""),
@@ -665,7 +688,7 @@ async def handle_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["quantity_waiting"] = False
     original_amount = quantity * unit_price
-    discount_percent = load_discount_percent()
+    discount_percent = load_user_discount_percent(update.effective_user.id)
     amount = discounted_price(original_amount, discount_percent)
     discount_amount = original_amount - amount
     context.user_data["pending_order"] = {
@@ -1027,7 +1050,7 @@ async def renew_service_callback(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     original_amount = quantity * unit_price
-    discount_percent = load_discount_percent()
+    discount_percent = load_user_discount_percent(query.from_user.id)
     amount = discounted_price(original_amount, discount_percent)
     discount_amount = original_amount - amount
     order_id = db["next_id"]
@@ -1626,6 +1649,34 @@ async def setdiscount_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.effective_message.reply_text("✅ تخفیف غیرفعال شد؛ قیمت‌ها به حالت عادی برگشتند.")
 
 
+async def discount_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set or remove a discount for one customer only. /discount_user USER_ID PERCENT"""
+    if not is_admin(update.effective_user.id):
+        await update.effective_message.reply_text("⛔ این دستور فقط برای ادمین است.")
+        return
+    if len(context.args) != 2 or not context.args[0].isdigit() or not context.args[1].isdigit():
+        await update.effective_message.reply_text(
+            "فرمت دستور:\n/discount_user آیدی_مشتری درصد\n"
+            "مثال: /discount_user 6278794309 20\n"
+            "برای حذف تخفیف اختصاصی و برگشت به تخفیف عمومی: /discount_user 6278794309 0"
+        )
+        return
+    user_id, percent = int(context.args[0]), int(context.args[1])
+    if not 0 <= percent <= 100:
+        await update.effective_message.reply_text("درصد باید بین ۰ تا ۱۰۰ باشد.")
+        return
+    save_user_discount_percent(user_id, percent)
+    if percent:
+        await update.effective_message.reply_text(
+            f"✅ تخفیف اختصاصی {percent}٪ برای مشتری با آیدی {user_id} تنظیم شد.\n"
+            "این تخفیف فقط برای سفارش‌های جدید این مشتری اعمال می‌شود."
+        )
+    else:
+        await update.effective_message.reply_text(
+            f"✅ تخفیف اختصاصی مشتری {user_id} حذف شد؛ از این پس تخفیف عمومی برای او اعمال می‌شود."
+        )
+
+
 async def discount_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.effective_message.reply_text("دسترسی ندارید.")
@@ -1979,46 +2030,16 @@ async def post_init(application: Application):
     application.bot_data["bot_username"] = me.username or ""
 
 
-def _start_health_server() -> None:
-    """Tiny HTTP endpoint on the platform port so Railway's health check passes.
-
-    python-telegram-bot's long polling opens no listening port, so without this
-    the platform sees no listener and may kill or restart the container.
-    Runs in a daemon thread because serve_forever() blocks.
-    """
-    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-    port = int(os.getenv("PORT", "8080"))
-
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802 (stdlib naming)
-            body = b"bot:polling\n"
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def log_message(self, *args):
-            return  # silence per-request logging noise
-
-    def _serve() -> None:
-        try:
-            ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
-        except Exception:
-            logger.exception("Health server failed to start (non-fatal)")
-
-    threading.Thread(target=_serve, daemon=True).start()
-
-
 def main():
     # Pydroid-friendly: if no token is configured, ask for it in the console.
     token = (BOT_TOKEN or "").strip()
     if not token or token == "PASTE_NEW_BOT_TOKEN_HERE":
-        # On Railway the container has no interactive console: fail fast and clearly.
-        raise SystemExit(
-            "BOT_TOKEN تنظیم نشده. در متغیرهای محیطی Railway مقدار BOT_TOKEN را اضافه کن."
-        )
+        print("توکن جدید ربات را از @BotFather کپی کن و اینجا وارد کن.")
+        print("توکن را در چت با هیچ‌کس به اشتراک نگذار؛ ورودی در کنسول نمایش داده می‌شود.")
+        try:
+            token = input("BOT_TOKEN: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            raise SystemExit("ورودی توکن لغو شد.")
     if not token:
         raise SystemExit("توکن خالی است. فایل را دوباره اجرا کن و توکن جدید را وارد کن.")
     if ":" not in token or len(token) < 30:
@@ -2041,6 +2062,7 @@ def main():
     app.add_handler(CommandHandler("removeadmin", removeadmin_command))
     app.add_handler(CommandHandler("admins", admins_command))
     app.add_handler(CommandHandler("setdiscount", setdiscount_command))
+    app.add_handler(CommandHandler("discount_user", discount_user_command))
     app.add_handler(CommandHandler("discount", discount_command))
     app.add_handler(CommandHandler("secretary", secretary_command))
     app.add_handler(CommandHandler("mode", mode_command))
@@ -2070,9 +2092,6 @@ def main():
     app.add_handler(TypeHandler(Update, business_connection_update), group=1)
     app.add_handler(TypeHandler(Update, business_message_handler), group=2)
     app.add_error_handler(error_handler)
-
-    # Railway exposes exactly one port; the health server must run beside polling.
-    _start_health_server()
 
     print("Bot is running. Stop with Ctrl+C or the stop button in Pydroid.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
