@@ -814,6 +814,8 @@ async def handle_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get("quantity_waiting"):
         return False
     raw = (update.message.text or "").strip()
+    # Accept Persian/Arabic numerals as well as English digits.
+    raw = raw.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))
     try:
         quantity = int(raw)
     except ValueError:
@@ -848,7 +850,7 @@ async def handle_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "panel": panel,
         "product": product,
         "quantity": quantity,
-        "service_name": source.get("service_name") or source.get("panel", "سرویس"),
+        "service_name": panel or "سرویس",
         "amount": amount,
         "original_amount": original_amount,
         "discount_percent": discount_percent,
@@ -860,25 +862,6 @@ async def handle_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "مثال: سرور گیمینگ شماره ۵۰ یا سرور گوشی\n"
         "این نام در بخش «سرویس‌های من» نمایش داده می‌شود.",
         reply_markup=ReplyKeyboardMarkup([["❌ لغو خرید"]], resize_keyboard=True),
-    )
-    return True
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ ثبت سفارش و ارسال رسید", callback_data="confirm_order")],
-        [InlineKeyboardButton("❌ لغو خرید", callback_data="cancel_order")],
-        [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="global_back")],
-    ])
-    await update.message.reply_text(
-        f"🧾 خلاصه سفارش\n\n"
-        f"🌐 سرویس: {panel}\n"
-        f"📦 محصول: {product}\n"
-        f"🔢 تعداد/حجم: {quantity}\n"
-        + (f"💵 مبلغ قبل از تخفیف: {money(original_amount)}\n🏷 تخفیف: {discount_percent}٪ (کم‌شده: {money(discount_amount)})\n" if discount_percent else "")
-        + f"💵 مبلغ قابل پرداخت: {money(amount)}\n\n"
-        f"💳 اطلاعات پرداخت:\n"
-        f"شماره کارت: 5022291620713105\n"
-        f"به نام: محمد امین یوسفی\n\n"
-        f"اگر اطلاعات درست است، ثبت سفارش را بزنید. سپس رسید پرداخت را به صورت عکس ارسال کنید.",
-        reply_markup=keyboard,
     )
     return True
 
