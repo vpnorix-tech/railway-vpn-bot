@@ -62,17 +62,17 @@ logger = logging.getLogger(__name__)
 # Public prices seen in the screenshots. Verify/update these before accepting payments.
 # Turkey VIP server was discontinued and is intentionally removed from the shop.
 PRODUCTS = {
-    "🎮 سرور تانل گیمینگ VIP": [
-        ("هر گیگابایت", 8000),
+    "🎮 سرور وایرگاد گیمینگ VIP": [
+        ("هر گیگابایت", 6000),
     ],
     "🌐 سرور وب‌گردی V2Ray": [
         ("هر گیگابایت", 5000),
     ],
 }
 
-# Map each purchasable panel to its own admin-controlled availability switch.
+# Each panel has its own admin-controlled availability switch.
 PANEL_SECTION_KEYS = {
-    "🎮 سرور تانل گیمینگ VIP": "gaming",
+    "🎮 سرور وایرگاد گیمینگ VIP": "gaming",
     "🌐 سرور وب‌گردی V2Ray": "v2ray",
 }
 
@@ -1083,7 +1083,7 @@ async def sendconfig_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def handle_config_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    if not update.effective_user or not is_admin(update.effective_user.id):
         return False
     order_id = context.user_data.get("config_order_id")
     if not order_id:
@@ -1101,20 +1101,55 @@ async def handle_config_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         await context.bot.send_message(
             chat_id=order["user_id"],
-            text=f"🎉 کانفیگ سفارش #{order_id} شما آماده است:\n\n{text_value}",
+            text=f"🎉 اطلاعات سرویس سفارش #{order_id} از طرف پشتیبانی:\n\n{text_value}",
         )
     except Exception:
-        logger.exception("Failed to send config to customer")
-        await update.message.reply_text(
-            "ارسال کانفیگ به مشتری ناموفق بود. بررسی کنید مشتری قبلاً ربات را Start کرده باشد."
-        )
+        logger.exception("Failed to send config text to customer")
+        await update.message.reply_text("ارسال به مشتری ناموفق بود. مطمئن شوید مشتری قبلاً ربات را Start کرده باشد.")
         return True
     order["status"] = "کانفیگ تحویل داده شد"
     order["config_sent"] = True
     order["config_sent_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     save_db(db)
     context.user_data.pop("config_order_id", None)
-    await update.message.reply_text(f"کانفیگ سفارش #{order_id} با موفقیت ارسال شد.")
+    await update.message.reply_text(f"اطلاعات سفارش #{order_id} با موفقیت به مشتری ارسال شد.")
+    return True
+
+
+async def handle_config_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Forward an admin's document, photo, or video as the delivery for an approved order."""
+    if not update.effective_user or not is_admin(update.effective_user.id):
+        return False
+    order_id = context.user_data.get("config_order_id")
+    message = update.effective_message
+    if not order_id or not message:
+        return False
+    db = load_db()
+    order = db["orders"].get(str(order_id))
+    if not order or order.get("status") != "رسید تأییدشده؛ در انتظار کانفیگ":
+        context.user_data.pop("config_order_id", None)
+        await message.reply_text("این سفارش دیگر آماده تحویل نیست.")
+        return True
+    caption = f"🎉 اطلاعات سرویس سفارش #{order_id} از طرف پشتیبانی"
+    try:
+        if message.document:
+            await context.bot.send_document(order["user_id"], message.document.file_id, caption=caption)
+        elif message.video:
+            await context.bot.send_video(order["user_id"], message.video.file_id, caption=caption)
+        elif message.photo:
+            await context.bot.send_photo(order["user_id"], message.photo[-1].file_id, caption=caption)
+        else:
+            return False
+    except Exception:
+        logger.exception("Failed to send config media to customer")
+        await message.reply_text("ارسال فایل به مشتری ناموفق بود. مطمئن شوید مشتری قبلاً ربات را Start کرده باشد.")
+        return True
+    order["status"] = "کانفیگ تحویل داده شد"
+    order["config_sent"] = True
+    order["config_sent_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    save_db(db)
+    context.user_data.pop("config_order_id", None)
+    await message.reply_text(f"فایل سفارش #{order_id} با موفقیت به مشتری ارسال شد.")
     return True
 
 
@@ -1628,6 +1663,8 @@ async def market_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def market_photo_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await handle_config_media(update, context):
+        return
     flow = context.user_data.get("market_flow")
     if flow and flow.get("step") == "photos" and update.message and update.message.photo:
         photos = flow.setdefault("photos", [])
@@ -2245,6 +2282,7 @@ def main():
     app.add_handler(CallbackQueryHandler(market_callback, pattern=r"^market:"))
     app.add_handler(CallbackQueryHandler(virtual_service_callback, pattern=r"^virtual:\d+$"))
     app.add_handler(MessageHandler(filters.PHOTO, market_photo_input))
+    app.add_handler(MessageHandler(filters.VIDEO | filters.Document.ALL, handle_config_media))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu_text))
     # Telegram Business updates are separate from normal bot-chat updates.
     app.add_handler(TypeHandler(Update, business_connection_update), group=1)
