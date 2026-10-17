@@ -579,6 +579,7 @@ def order_text(order):
         f"یوزرنیم: {order['username']}\n"
         f"آیدی عددی: {order['user_id']}\n"
         f"🌐 سرویس: {order['panel']}\n"
+        f"🏷 نام انتخابی مشتری: {order.get('service_name', 'ثبت نشده')}\n"
         f"📦 محصول: {order['product']}\n"
         f"🔢 تعداد: {order['quantity']}\n"
         f"💵 مبلغ: {money(order['amount'])}{discount_line}\n"
@@ -847,11 +848,20 @@ async def handle_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "panel": panel,
         "product": product,
         "quantity": quantity,
+        "service_name": source.get("service_name") or source.get("panel", "سرویس"),
         "amount": amount,
         "original_amount": original_amount,
         "discount_percent": discount_percent,
         "discount_amount": discount_amount,
     }
+    context.user_data["service_name_waiting"] = True
+    await update.message.reply_text(
+        "🏷 برای سرویس خود یک نام انتخاب کنید و بفرستید.\n\n"
+        "مثال: سرور گیمینگ شماره ۵۰ یا سرور گوشی\n"
+        "این نام در بخش «سرویس‌های من» نمایش داده می‌شود.",
+        reply_markup=ReplyKeyboardMarkup([["❌ لغو خرید"]], resize_keyboard=True),
+    )
+    return True
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ ثبت سفارش و ارسال رسید", callback_data="confirm_order")],
         [InlineKeyboardButton("❌ لغو خرید", callback_data="cancel_order")],
@@ -878,6 +888,7 @@ async def order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     if query.data == "cancel_order":
         context.user_data.pop("pending_order", None)
+        context.user_data.pop("service_name_waiting", None)
         await query.message.reply_text("سفارش لغو شد.", reply_markup=MAIN_MARKUP)
         return
     if query.data != "confirm_order":
@@ -1247,7 +1258,7 @@ async def config_delivery_callback(update: Update, context: ContextTypes.DEFAULT
     )
 
 
-async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 0):
     db = load_db()
     mine = [
         o for o in db["orders"].values()
@@ -1257,33 +1268,91 @@ async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     mine.sort(key=lambda o: o.get("id", 0), reverse=True)
     if not mine:
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             "📱 هنوز سرویس تحویل‌داده‌شده‌ای ندارید.\nبعد از تحویل کانفیگ، سرویس در همین بخش نمایش داده می‌شود.",
             reply_markup=MAIN_MARKUP,
         )
         return
-
-    lines = ["📱 سرویس‌های تحویل‌داده‌شده شما:", "برای تمدید هر سرویس، دکمهٔ زیر همان سرویس را بزنید."]
+    page_size = 10
+    total_pages = max(1, (len(mine) + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    selected = mine[page * page_size:(page + 1) * page_size]
+    lines = [f"📱 سرویس‌های شما ({len(mine)} سرویس)\nصفحه {page + 1} از {total_pages}", "برای مشاهده یا تمدید، سرویس را انتخاب کنید:"]
     keyboard = []
-    for order in mine:
+    for order in selected:
         code = order.get("id", "—")
         customer_code = order.get("order_number", code)
-        lines.append(
-            f"\n━━━━━━━━━━━━\n"
-            f"📦 نام سرویس: {order.get('panel', 'سرویس')}\n"
-            f"🔹 محصول: {order.get('product', '—')}\n"
-            f"🧾 شماره سفارش شما: #{customer_code}\n"
-            f"📊 حجم/تعداد: {order.get('quantity', '—')}\n"
-            f"💵 مبلغ خرید: {money(order.get('amount', 0))}"
-        )
-        keyboard.append([InlineKeyboardButton(
-            f"♻️ تمدید {order.get('panel', 'سرویس')} | #{customer_code}",
-            callback_data=f"renew_service:{code}"
-        )])
-    await update.message.reply_text(
-        "\n".join(lines),
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        name = order.get("service_name") or order.get("panel", "سرویس")
+        lines.append(f"\n• {name} — سفارش #{customer_code}\n  {order.get('product', '—')} | حجم/تعداد: {order.get('quantity', '—')}")
+        keyboard.append([InlineKeyboardButton(f"📦 {name} | #{customer_code}", callback_data=f"myservice:{code}")])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ صفحه قبل", callback_data=f"myservices_page:{page-1}"))
+    if page + 1 < total_pages:
+        nav.append(InlineKeyboardButton("صفحه بعد ➡️", callback_data=f"myservices_page:{page+1}"))
+    if nav:
+        keyboard.append(nav)
+    keyboard.append([InlineKeyboardButton("🔙 منوی اصلی", callback_data="global_back")])
+    await update.effective_message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def my_service_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    db = load_db()
+    try:
+        order_id = str(int(query.data.split(":", 1)[1]))
+    except (ValueError, IndexError):
+        await query.message.reply_text("شناسه سرویس معتبر نیست.")
+        return
+    order = db.get("orders", {}).get(order_id)
+    if not order or order.get("user_id") != query.from_user.id or order.get("status") != "کانفیگ تحویل داده شد" or not order.get("config_sent"):
+        await query.message.reply_text("این سرویس پیدا نشد یا متعلق به شما نیست.")
+        return
+    code = order.get("order_number", order_id)
+    name = order.get("service_name") or order.get("panel", "سرویس")
+    text = (
+        f"📱 مشخصات سرویس شما\n\n🏷 نام سرویس: {name}\n"
+        f"📦 نوع سرویس: {order.get('panel', '—')}\n🔹 محصول: {order.get('product', '—')}\n"
+        f"🧾 شماره سفارش: #{code}\n📊 حجم/تعداد: {order.get('quantity', '—')}\n"
+        f"💵 مبلغ خرید: {money(order.get('amount', 0))}\n📌 وضعیت: تحویل داده شده"
     )
+    await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("♻️ تمدید همین سرویس", callback_data=f"renew_service:{order_id}")],
+        [InlineKeyboardButton("📋 دریافت دوباره اطلاعات سرویس", callback_data=f"service_info:{order_id}")],
+        [InlineKeyboardButton("🔙 سرویس‌های من", callback_data="myservices_page:0")],
+    ]))
+
+
+async def my_services_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    try:
+        page = int(query.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        page = 0
+    # Reuse callback message as the destination while keeping the existing message intact.
+    db = load_db()
+    mine = [o for o in db["orders"].values() if o.get("user_id") == query.from_user.id and o.get("status") == "کانفیگ تحویل داده شد" and o.get("config_sent")]
+    mine.sort(key=lambda o: o.get("id", 0), reverse=True)
+    page_size = 10
+    total_pages = max(1, (len(mine) + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    selected = mine[page * page_size:(page + 1) * page_size]
+    lines = [f"📱 سرویس‌های شما ({len(mine)} سرویس)\nصفحه {page + 1} از {total_pages}", "برای مشاهده یا تمدید، سرویس را انتخاب کنید:"]
+    keyboard = []
+    for order in selected:
+        code = order.get("id", "—")
+        num = order.get("order_number", code)
+        name = order.get("service_name") or order.get("panel", "سرویس")
+        lines.append(f"\n• {name} — سفارش #{num}\n  {order.get('product', '—')} | حجم/تعداد: {order.get('quantity', '—')}")
+        keyboard.append([InlineKeyboardButton(f"📦 {name} | #{num}", callback_data=f"myservice:{code}")])
+    nav=[]
+    if page > 0: nav.append(InlineKeyboardButton("⬅️ صفحه قبل", callback_data=f"myservices_page:{page-1}"))
+    if page + 1 < total_pages: nav.append(InlineKeyboardButton("صفحه بعد ➡️", callback_data=f"myservices_page:{page+1}"))
+    if nav: keyboard.append(nav)
+    keyboard.append([InlineKeyboardButton("🔙 منوی اصلی", callback_data="global_back")])
+    await query.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def renew_service_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1338,6 +1407,7 @@ async def renew_service_callback(update: Update, context: ContextTypes.DEFAULT_T
         "panel": panel,
         "product": product,
         "quantity": quantity,
+        "service_name": source.get("service_name") or source.get("panel", "سرویس"),
         "amount": amount,
         "original_amount": original_amount,
         "discount_percent": discount_percent,
@@ -1562,6 +1632,36 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await access_gate(update, context):
         return
     txt = (update.message.text or "").strip()
+
+    if context.user_data.get("service_name_waiting"):
+        if txt in ("❌ لغو خرید", "لغو"):
+            context.user_data.pop("service_name_waiting", None)
+            context.user_data.pop("pending_order", None)
+            await update.message.reply_text("خرید لغو شد.", reply_markup=MAIN_MARKUP)
+            return
+        if not txt or len(txt) > 50:
+            await update.message.reply_text("نام سرویس باید بین ۱ تا ۵۰ نویسه باشد. دوباره بفرستید.")
+            return
+        pending = context.user_data.get("pending_order")
+        if not pending:
+            context.user_data.pop("service_name_waiting", None)
+            await update.message.reply_text("اطلاعات سفارش پیدا نشد؛ لطفاً خرید را دوباره شروع کنید.", reply_markup=MAIN_MARKUP)
+            return
+        pending["service_name"] = txt
+        context.user_data["service_name_waiting"] = False
+        percent = pending.get("discount_percent", 0)
+        discount_line = (f"💵 مبلغ قبل از تخفیف: {money(pending['original_amount'])}\n🏷 تخفیف: {percent}٪\n" if percent else "")
+        await update.message.reply_text(
+            f"🧾 خلاصه سفارش\n\n🌐 سرویس: {pending['panel']}\n📦 محصول: {pending['product']}\n"
+            f"🏷 نام انتخابی شما: {txt}\n📊 حجم/تعداد: {pending['quantity']}\n"
+            f"{discount_line}💵 مبلغ قابل پرداخت: {money(pending['amount'])}\n\n"
+            "💳 پس از ثبت سفارش، عکس رسید پرداخت را ارسال کنید.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ ثبت سفارش و ارسال رسید", callback_data="confirm_order")],
+                [InlineKeyboardButton("❌ لغو خرید", callback_data="cancel_order")],
+            ]),
+        )
+        return
 
     if txt in ("🔙 منوی اصلی", "🔙 بازگشت به منوی اصلی"):
         # If the user is in the payment/receipt stage, treat going back as cancelling that order.
@@ -2427,6 +2527,8 @@ def main():
     app.add_handler(CallbackQueryHandler(cancel_active_order_callback, pattern=r"^cancel_active_order:\d+$"))
     app.add_handler(CallbackQueryHandler(panel_callback, pattern=r"^(panel:\d+|back|back_to_panels|product:\d+)$"))
     app.add_handler(CallbackQueryHandler(order_callback, pattern=r"^(confirm_order|cancel_order)$"))
+    app.add_handler(CallbackQueryHandler(my_service_callback, pattern=r"^myservice:\d+$"))
+    app.add_handler(CallbackQueryHandler(my_services_page_callback, pattern=r"^myservices_page:\d+$"))
     app.add_handler(CallbackQueryHandler(renew_service_callback, pattern=r"^renew_service:\d+$"))
     app.add_handler(CallbackQueryHandler(review_callback, pattern=r"^review:(approve|reject):\d+$"))
     app.add_handler(CallbackQueryHandler(config_delivery_callback, pattern=r"^(deliver_config|cancel_config_delivery):\d+$"))
