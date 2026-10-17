@@ -651,25 +651,56 @@ async def begin_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     data = query.data
+
+    # Check the section switch before answering/opening a panel. Use a Telegram
+    # alert so the customer immediately sees the admin's custom maintenance text.
+    async def deny_if_closed(key):
+        if is_admin(query.from_user.id):
+            return False
+        setting = load_section_settings().get(key)
+        if not setting:
+            return False
+        message = str(setting.get("message") or "این قسمت موقتاً در دسترس نیست.")
+        await query.answer(text=message[:190], show_alert=True)
+        return True
+
+    # Handle section gates before the generic callback acknowledgement.
+    if data.startswith("panel:"):
+        if await deny_if_closed("purchase"):
+            return
+        panels = list(PRODUCTS)
+        try:
+            idx = int(data.split(":", 1)[1])
+            selected_panel = panels[idx] if 0 <= idx < len(panels) else None
+        except (ValueError, IndexError):
+            selected_panel = None
+        if selected_panel is None:
+            await query.answer("گزینه نامعتبر است.", show_alert=True)
+            return
+        section_key = PANEL_SECTION_KEYS.get(selected_panel)
+        if section_key and await deny_if_closed(section_key):
+            return
+
+    elif data.startswith("product:"):
+        panel = context.user_data.get("panel")
+        section_key = PANEL_SECTION_KEYS.get(panel)
+        if section_key and await deny_if_closed(section_key):
+            return
+
+    await query.answer()
 
     if data == "back":
         await query.message.reply_text("به منوی اصلی برگشتید.", reply_markup=MAIN_MARKUP)
         return
 
     if data.startswith("panel:"):
-        if not is_admin(query.from_user.id) and await section_gate(query.message, "purchase"):
-            return
         panels = list(PRODUCTS)
         idx = int(data.split(":")[1])
         if idx < 0 or idx >= len(panels):
             await query.message.reply_text("گزینه نامعتبر است.")
             return
         selected_panel = panels[idx]
-        section_key = PANEL_SECTION_KEYS.get(selected_panel)
-        if section_key and not is_admin(query.from_user.id) and await section_gate(query.message, section_key):
-            return
         context.user_data["panel"] = selected_panel
         percent = load_user_discount_percent(query.from_user.id)
         keyboard = [
@@ -695,9 +726,6 @@ async def panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("product:"):
         panel = context.user_data.get("panel")
-        section_key = PANEL_SECTION_KEYS.get(panel)
-        if section_key and not is_admin(query.from_user.id) and await section_gate(query.message, section_key):
-            return
         if panel not in PRODUCTS:
             await query.message.reply_text("از منوی اصلی دوباره خرید را شروع کنید.")
             return
