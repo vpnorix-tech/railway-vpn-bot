@@ -68,12 +68,20 @@ PRODUCTS = {
     "🌐 سرور وب‌گردی V2Ray": [
         ("هر گیگابایت", 5000),
     ],
+    "♾️ سرور نامحدود VIP": [
+        ("۱ ماه", 150000),
+        ("۲ ماه", 300000),
+        ("۳ ماه", 450000),
+        ("۴ ماه", 600000),
+        ("۵ ماه", 750000),
+    ],
 }
 
 # Each panel has its own admin-controlled availability switch.
 PANEL_SECTION_KEYS = {
     "🎮 سرور وایرگاد گیمینگ VIP": "gaming",
     "🌐 سرور وب‌گردی V2Ray": "v2ray",
+    "♾️ سرور نامحدود VIP": "unlimited",
 }
 
 MAIN_MENU = [
@@ -278,6 +286,7 @@ SECTION_NAMES = {
     "purchase": "خرید سرویس / انتخاب پنل و سرور",
     "gaming": "سرور تانل گیمینگ VIP",
     "v2ray": "سرور وب‌گردی V2Ray",
+    "unlimited": "سرور نامحدود VIP",
     "market": "شاپ اکانت بازی‌ها",
     "virtual": "خدمات مجازی",
     "test": "اکانت تست",
@@ -740,6 +749,8 @@ async def panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["quantity_waiting"] = True
         if product == "هر گیگابایت":
             prompt = "⚠️ توجه: حداقل خرید سرویس ۱۰ گیگابایت و حداکثر ۲۰۰ گیگابایت است.\n\nحجم موردنظر را با عدد انگلیسی بین 10 تا 200 بفرستید. مثال: 10"
+        elif panel == "♾️ سرور نامحدود VIP":
+            prompt = f"مدت انتخابی: {product}\nبرای ادامه و ثبت همین پلن، عدد 1 را بفرستید."
         else:
             prompt = "لطفاً تعداد موردنظر را وارد کنید (فعلاً از 1 تا 10)."
         await query.message.reply_text(prompt)
