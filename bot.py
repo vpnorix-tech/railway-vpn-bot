@@ -1760,9 +1760,12 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("wallet_topup_waiting", None)
         context.user_data["wallet_topup_receipt_waiting"] = True
         await update.message.reply_text(
-            f"💰 مبلغ درخواستی: {money(amount)} تومان\n\n"
-            "حالا مبلغ را به کارت اعلام‌شده در بخش پرداخت واریز کنید و سپس عکس رسید واریز را همین‌جا ارسال کنید.\n"
-            "بعد از ارسال رسید، درخواست برای ادمین می‌رود تا پرداخت را بررسی و تأیید یا رد کند.\n\n"
+            f"💰 شارژ کیف پول SpeedCon\n\n"
+            f"💵 مبلغ قابل واریز: {money(amount)} تومان\n"
+            "👤 نام صاحب کارت: محمد امین یوسفی\n"
+            "💳 شماره کارت: 5022291620713105\n\n"
+            "لطفاً مبلغ بالا را به کارت اعلام‌شده واریز کنید و سپس عکس رسید را همین‌جا ارسال کنید.\n"
+            "پس از ارسال رسید، درخواست برای ادمین می‌رود. فقط پس از تأیید ادمین، مبلغ به کیف پول شما اضافه می‌شود.\n\n"
             "برای لغو بنویسید: لغو",
             reply_markup=ReplyKeyboardMarkup([["❌ لغو"]], resize_keyboard=True),
         )
