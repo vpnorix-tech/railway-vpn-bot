@@ -45,6 +45,7 @@ ADMINS_FILE = Path(__file__).with_name("admins.json")
 DISCOUNT_FILE = Path(__file__).with_name("discount_settings.json")
 USERS_FILE = Path(__file__).with_name("users.json")
 ACCESS_FILE = Path(__file__).with_name("access_settings.json")
+SECTION_FILE = Path(__file__).with_name("section_settings.json")
 TEST_FILE = Path(__file__).with_name("test_accounts.json")
 # Serializes test-pool updates so two nearly simultaneous requests cannot take the same link.
 TEST_ACCOUNTS_LOCK = asyncio.Lock()
@@ -267,6 +268,100 @@ def save_access_data(data):
     with tmp.open("w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     tmp.replace(ACCESS_FILE)
+
+
+SECTION_NAMES = {
+    "purchase": "خرید سرویس / انتخاب پنل و سرور",
+    "gaming": "سرور گیمینگ",
+    "market": "شاپ اکانت بازی‌ها",
+    "virtual": "خدمات مجازی",
+    "test": "اکانت تست",
+    "tariffs": "تعرفه سرویس‌ها",
+    "renew": "تمدید سرویس",
+}
+
+
+def load_section_settings():
+    if not SECTION_FILE.exists():
+        return {}
+    try:
+        with SECTION_FILE.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        logger.exception("Could not read section settings")
+        return {}
+
+
+def save_section_settings(data):
+    tmp = SECTION_FILE.with_suffix(".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    tmp.replace(SECTION_FILE)
+
+
+def section_is_closed(key):
+    return key in load_section_settings()
+
+
+async def section_gate(message, key):
+    """Tell the customer the admin's custom message if a section is closed."""
+    setting = load_section_settings().get(key)
+    if not setting:
+        return False
+    await message.reply_text(setting.get("message", "این قسمت موقتاً در دسترس نیست."))
+    return True
+
+
+async def section_close_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.effective_message.reply_text("⛔ این دستور فقط برای ادمین است.")
+        return
+    if len(context.args) < 2:
+        keys = "\n".join(f"{key} — {name}" for key, name in SECTION_NAMES.items())
+        await update.effective_message.reply_text(
+            "فرمت:\n/section_close purchase این قسمت در حال آپدیت است\n\n"
+            "بخش‌های قابل بستن (کلید انگلیسی):\n" + keys
+        )
+        return
+    key = context.args[0].lower()
+    if key not in SECTION_NAMES:
+        await update.effective_message.reply_text("کلید بخش نامعتبر است. برای دیدن فهرست، /section_close را بفرستید.")
+        return
+    message = " ".join(context.args[1:]).strip()
+    data = load_section_settings()
+    data[key] = {"message": message}
+    save_section_settings(data)
+    await update.effective_message.reply_text(f"✅ بخش «{SECTION_NAMES[key]}» بسته شد.\nپیام مشتری: {message}\nبرای بازکردن: /section_open {key}")
+
+
+async def section_open_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.effective_message.reply_text("⛔ این دستور فقط برای ادمین است.")
+        return
+    if not context.args:
+        await update.effective_message.reply_text("فرمت: /section_open purchase")
+        return
+    key = context.args[0].lower()
+    if key not in SECTION_NAMES:
+        await update.effective_message.reply_text("کلید بخش نامعتبر است.")
+        return
+    data = load_section_settings()
+    data.pop(key, None)
+    save_section_settings(data)
+    await update.effective_message.reply_text(f"✅ بخش «{SECTION_NAMES[key]}» دوباره باز شد.")
+
+
+async def sections_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.effective_message.reply_text("⛔ این دستور فقط برای ادمین است.")
+        return
+    data = load_section_settings()
+    lines = ["وضعیت بخش‌های ربات:"]
+    for key, name in SECTION_NAMES.items():
+        status = f"🔴 بسته — {data[key].get('message', '')}" if key in data else "🟢 باز"
+        lines.append(f"{key} | {name}: {status}")
+    await update.effective_message.reply_text("\n".join(lines))
 
 
 async def access_gate(update, context):
@@ -541,6 +636,8 @@ def server_selection_markup():
 
 
 async def begin_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id) and await section_gate(update.effective_message, "purchase"):
+        return
     await update.effective_message.reply_text(
         "🌍 لطفاً سرور موردنظر را انتخاب کنید:",
         reply_markup=server_selection_markup(),
@@ -557,6 +654,8 @@ async def panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data.startswith("panel:"):
+        if not is_admin(query.from_user.id) and await section_gate(query.message, "purchase"):
+            return
         panels = list(PRODUCTS)
         idx = int(data.split(":")[1])
         if idx < 0 or idx >= len(panels):
@@ -617,6 +716,8 @@ VIRTUAL_PRODUCTS = [
 async def virtual_service_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    if not is_admin(query.from_user.id) and await section_gate(query.message, "virtual"):
+        return
     try:
         index = int(query.data.split(":", 1)[1])
         if index < 0 or index >= len(VIRTUAL_PRODUCTS):
@@ -1209,6 +1310,8 @@ async def test_request_callback(update: Update, context: ContextTypes.DEFAULT_TY
     user = query.from_user
     if not user or not query.message:
         return
+    if not is_admin(user.id) and await section_gate(query.message, "test"):
+        return
 
     user_key = str(user.id)
     # Claim + save happen under one lock: each user gets one link, and each link
@@ -1317,8 +1420,12 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if txt == "🎮 شاپ اکانت بازی‌ها":
+        if not is_admin(update.effective_user.id) and await section_gate(update.message, "market"):
+            return
         await market_open(update, context)
     elif txt == "💎 خدمات مجازی":
+        if not is_admin(update.effective_user.id) and await section_gate(update.message, "virtual"):
+            return
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("💎 تلگرام پرمیوم — ۱ ماه | ۱٬۲۰۰٬۰۰۰ تومان", callback_data="virtual:0")],
             [InlineKeyboardButton("💎 تلگرام پرمیوم — ۳ ماه | ۳٬۹۰۰٬۰۰۰ تومان", callback_data="virtual:1")],
@@ -1329,10 +1436,14 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif txt == "🚀 خرید سرویس جدید":
         await begin_purchase(update, context)
     elif txt == "💰 تعرفه سرویس‌ها":
+        if not is_admin(update.effective_user.id) and await section_gate(update.message, "tariffs"):
+            return
         await show_tariffs(update, context)
     elif txt == "📱 سرویس‌های من":
         await my_orders(update, context)
     elif txt == "🧪 اکانت تست":
+        if not is_admin(update.effective_user.id) and await section_gate(update.message, "test"):
+            return
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🎁 دریافت اکانت تست رایگان", callback_data="test:request")],
             [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="global_back")],
@@ -1342,6 +1453,8 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=keyboard,
         )
     elif txt == "♻️ تمدید سرویس":
+        if not is_admin(update.effective_user.id) and await section_gate(update.message, "renew"):
+            return
         await my_orders(update, context)
     elif txt == "💡 آموزش استفاده":
         await update.message.reply_text("آموزش استفاده فعلاً در حال آماده‌سازی است.", reply_markup=MAIN_MARKUP)
@@ -1492,6 +1605,8 @@ async def market_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
     user = query.from_user
+    if not is_admin(user.id) and await section_gate(query.message, "market"):
+        return
     if data == "market:home":
         context.user_data.pop("market_flow", None)
         await query.message.reply_text("به منوی اصلی برگشتید.", reply_markup=MAIN_MARKUP)
@@ -2077,6 +2192,9 @@ def main():
     app.add_handler(CommandHandler("sendconfig", sendconfig_command))
     app.add_handler(CommandHandler("test_add", test_add_command))
     app.add_handler(CommandHandler("test_list", test_list_command))
+    app.add_handler(CommandHandler("section_close", section_close_command))
+    app.add_handler(CommandHandler("section_open", section_open_command))
+    app.add_handler(CommandHandler("sections", sections_command))
     app.add_handler(CallbackQueryHandler(global_back_callback, pattern=r"^global_back$"))
     app.add_handler(CallbackQueryHandler(test_request_callback, pattern=r"^test:request$"))
     app.add_handler(CallbackQueryHandler(cancel_active_order_callback, pattern=r"^cancel_active_order:\d+$"))
