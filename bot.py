@@ -1483,18 +1483,63 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if txt in ("🔙 منوی اصلی", "🔙 بازگشت به منوی اصلی"):
         # If the user is in the payment/receipt stage, treat going back as cancelling that order.
         await cancel_active_order(update.effective_user.id, context)
-        for key in ("quantity_waiting", "pending_order", "market_flow", "panel", "product", "unit_price", "config_flow"):
+        for key in ("quantity_waiting", "pending_order", "market_flow", "panel", "product", "unit_price", "config_flow", "contact_flow"):
             context.user_data.pop(key, None)
         await update.message.reply_text("به منوی اصلی برگشتید. عملیات نیمه‌کاره لغو شد.", reply_markup=MAIN_MARKUP)
         return
 
     if txt == "🔙 بازگشت به انتخاب سرور":
+        context.user_data.pop("contact_flow", None)
         context.user_data.pop("quantity_waiting", None)
         context.user_data.pop("pending_order", None)
         context.user_data.pop("panel", None)
         context.user_data.pop("product", None)
         context.user_data.pop("unit_price", None)
         await begin_purchase(update, context)
+        return
+
+    # Support and dealership requests are forwarded to the configured admins.
+    contact_flow = context.user_data.get("contact_flow")
+    if contact_flow:
+        if txt in ("لغو", "انصراف", "/cancel"):
+            context.user_data.pop("contact_flow", None)
+            await update.message.reply_text("عملیات لغو شد.", reply_markup=MAIN_MARKUP)
+            return
+        user = update.effective_user
+        username = f"@{user.username}" if user and user.username else "ندارد"
+        display_name = user.full_name if user else "نامشخص"
+        if contact_flow == "support":
+            subject = "📩 پیام جدید پشتیبانی"
+            body = txt
+        else:
+            subject = "🤝 درخواست جدید نمایندگی"
+            body = txt
+        admin_text = (
+            f"{subject}\n\n"
+            f"👤 نام: {display_name}\n"
+            f"🔗 نام کاربری: {username}\n"
+            f"🆔 آیدی عددی: {user.id if user else 'نامشخص'}\n\n"
+            f"📝 متن درخواست:\n{body[:3500]}\n\n"
+            f"برای پاسخ: /senduser {user.id if user else 0} متن پیام"
+        )
+        sent = 0
+        for admin_id in load_admin_ids():
+            try:
+                await context.bot.send_message(chat_id=admin_id, text=admin_text)
+                sent += 1
+            except Exception:
+                logger.exception("Could not forward %s message from user %s to admin %s", contact_flow, user.id if user else None, admin_id)
+        context.user_data.pop("contact_flow", None)
+        if sent:
+            await update.message.reply_text(
+                "✅ درخواست شما ثبت و برای مدیریت ارسال شد. پاسخ پشتیبانی از همین ربات برایتان فرستاده می‌شود.",
+                reply_markup=MAIN_MARKUP,
+            )
+        else:
+            await update.message.reply_text(
+                "⚠️ پیام شما فعلاً به مدیریت نرسید. لطفاً کمی بعد دوباره تلاش کنید یا مستقیماً به پشتیبانی پیام بدهید.",
+                reply_markup=MAIN_MARKUP,
+            )
         return
 
     if await handle_config_text(update, context):
@@ -1556,9 +1601,20 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=MAIN_MARKUP,
         )
     elif txt == "🧑🏻‍💻 تماس با پشتیبانی":
-        await update.message.reply_text("برای پشتیبانی، پیام خود را همین‌جا بنویسید.", reply_markup=MAIN_MARKUP)
+        context.user_data["contact_flow"] = "support"
+        await update.message.reply_text(
+            "🧑🏻‍💻 پیام خود را برای پشتیبانی بنویسید تا برای مدیریت ارسال شود.\n\n"
+            "برای لغو، کلمه «لغو» را بفرستید.",
+            reply_markup=MAIN_MARKUP,
+        )
     elif txt == "🤝 درخواست نمایندگی":
-        await update.message.reply_text("برای درخواست نمایندگی، با پشتیبانی تماس بگیرید.", reply_markup=MAIN_MARKUP)
+        context.user_data["contact_flow"] = "representative"
+        await update.message.reply_text(
+            "🤝 درخواست نمایندگی\n\n"
+            "لطفاً در یک پیام این اطلاعات را بنویسید: نام، شهر/کشور، روش جذب مشتری و سابقه فروش (در صورت وجود).\n\n"
+            "درخواست شما برای مدیریت ارسال می‌شود. برای لغو، کلمه «لغو» را بفرستید.",
+            reply_markup=MAIN_MARKUP,
+        )
 
 
 # ================= ONLINE GAME ACCOUNT MARKETPLACE =================
