@@ -46,6 +46,7 @@ DISCOUNT_FILE = Path(__file__).with_name("discount_settings.json")
 USERS_FILE = Path(__file__).with_name("users.json")
 ACCESS_FILE = Path(__file__).with_name("access_settings.json")
 SECTION_FILE = Path(__file__).with_name("section_settings.json")
+PRICE_FILE = Path(__file__).with_name("price_settings.json")
 TEST_FILE = Path(__file__).with_name("test_accounts.json")
 WALLET_FILE = Path(__file__).with_name("wallet.json")
 # Serializes test-pool updates so two nearly simultaneous requests cannot take the same link.
@@ -84,6 +85,38 @@ PANEL_SECTION_KEYS = {
     "🌐 سرور وب‌گردی V2Ray": "v2ray",
     "♾️ سرور نامحدود VIP": "unlimited",
 }
+
+
+def load_price_overrides():
+    """Load saved unit prices without changing the existing product structure."""
+    if not PRICE_FILE.exists():
+        return
+    try:
+        with PRICE_FILE.open("r", encoding="utf-8") as f:
+            saved = json.load(f)
+        for product, tiers in saved.items():
+            if product not in PRODUCTS or not isinstance(tiers, dict):
+                continue
+            PRODUCTS[product] = [
+                (label, int(tiers.get(label, price)))
+                for label, price in PRODUCTS[product]
+            ]
+    except Exception:
+        logger.exception("Could not load saved price overrides")
+
+
+def save_price_overrides():
+    data = {
+        product: {label: int(price) for label, price in tiers}
+        for product, tiers in PRODUCTS.items()
+    }
+    tmp = PRICE_FILE.with_suffix(".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    tmp.replace(PRICE_FILE)
+
+
+load_price_overrides()
 
 MAIN_MENU = [
     ["🚀 خرید سرویس جدید", "🧪 اکانت تست"],
@@ -1752,6 +1785,101 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     txt = (update.message.text or "").strip()
 
+    # Admin price editor: only the admin who selected a tariff can complete the edit.
+    pending_price = context.user_data.get("admin_price_edit")
+    if pending_price:
+        if not update.effective_user or not is_admin(update.effective_user.id):
+            context.user_data.pop("admin_price_edit", None)
+            return
+        if txt in ("لغو", "انصراف", "❌ لغو"):
+            context.user_data.pop("admin_price_edit", None)
+            await update.message.reply_text("تغییر قیمت لغو شد.", reply_markup=admin_panel_markup())
+            return
+        raw_price = normalize_digits(txt).replace(",", "").replace("٬", "").replace(" ", "")
+        if not raw_price.isdigit():
+            await update.message.reply_text("قیمت باید فقط عدد باشد؛ مثال: 8000. برای لغو بنویس: لغو")
+            return
+        new_price = int(raw_price)
+        if not 1 <= new_price <= 1000000000:
+            await update.message.reply_text("قیمت باید بین ۱ تا ۱٬۰۰۰٬۰۰۰٬۰۰۰ تومان باشد.")
+            return
+        product = pending_price.get("product")
+        tier_index = pending_price.get("tier_index")
+        if product not in PRODUCTS or not isinstance(tier_index, int) or not 0 <= tier_index < len(PRODUCTS[product]):
+            context.user_data.pop("admin_price_edit", None)
+            await update.message.reply_text("تعرفه پیدا نشد؛ دوباره از پنل انتخاب کن.", reply_markup=admin_panel_markup())
+            return
+        label, old_price = PRODUCTS[product][tier_index]
+        PRODUCTS[product][tier_index] = (label, new_price)
+        try:
+            save_price_overrides()
+        except Exception:
+            PRODUCTS[product][tier_index] = (label, old_price)
+            logger.exception("Could not save changed product price")
+            await update.message.reply_text("ذخیره قیمت انجام نشد؛ دسترسی فایل‌ها را بررسی کن.")
+            return
+        context.user_data.pop("admin_price_edit", None)
+        await update.message.reply_text(f"✅ قیمت ذخیره شد و بعد از راه‌اندازی مجدد هم باقی می‌ماند.\n{product} — {label}: {money(old_price)} ← {money(new_price)} تومان", reply_markup=admin_panel_markup())
+        return
+
+    # Admin discount wizard: ask for customer numeric ID first, then discount percent.
+    discount_stage = context.user_data.get("admin_discount_stage")
+    if discount_stage:
+        if not update.effective_user or not is_admin(update.effective_user.id):
+            context.user_data.pop("admin_discount_stage", None)
+            context.user_data.pop("admin_discount_target", None)
+            return
+        if txt in ("لغو", "انصراف", "❌ لغو"):
+            context.user_data.pop("admin_discount_stage", None)
+            context.user_data.pop("admin_discount_target", None)
+            await update.message.reply_text("تغییر تخفیف لغو شد.", reply_markup=admin_panel_markup())
+            return
+        normalized_txt = normalize_digits(txt).strip()
+        if discount_stage == "user_id":
+            if not normalized_txt.isdigit() or int(normalized_txt) <= 0:
+                await update.message.reply_text("آیدی عددی مشتری را فقط با عدد معتبر بفرست. برای لغو بنویس: لغو")
+                return
+            target_id = int(normalized_txt)
+            context.user_data["admin_discount_target"] = target_id
+            context.user_data["admin_discount_stage"] = "percent"
+            current = load_user_discount_percent(target_id)
+            await update.message.reply_text(
+                f"🏷 مشتری: {target_id}\nتخفیف فعلی مؤثر: {current}٪\n\n"
+                "حالا درصد تخفیف را از ۰ تا ۱۰۰ بفرست.\n"
+                "عدد ۰ تخفیف اختصاصی را حذف می‌کند و مشتری به تخفیف عمومی برمی‌گردد."
+            )
+            return
+        if discount_stage == "percent":
+            if not normalized_txt.isdigit():
+                await update.message.reply_text("درصد را فقط به‌صورت عددی بین ۰ تا ۱۰۰ بفرست.")
+                return
+            percent = int(normalized_txt)
+            if not 0 <= percent <= 100:
+                await update.message.reply_text("درصد تخفیف باید بین ۰ تا ۱۰۰ باشد.")
+                return
+            target_id = context.user_data.get("admin_discount_target")
+            if not isinstance(target_id, int) or target_id <= 0:
+                context.user_data.pop("admin_discount_stage", None)
+                context.user_data.pop("admin_discount_target", None)
+                await update.message.reply_text("آیدی مشتری ثبت نشده؛ دوباره از پنل تخفیف را انتخاب کن.", reply_markup=admin_panel_markup())
+                return
+            try:
+                save_user_discount_percent(target_id, percent)
+            except Exception:
+                logger.exception("Could not save customer discount")
+                await update.message.reply_text("ذخیره تخفیف انجام نشد؛ فایل‌های ربات را بررسی کن.")
+                return
+            context.user_data.pop("admin_discount_stage", None)
+            context.user_data.pop("admin_discount_target", None)
+            if percent:
+                result = (f"✅ تخفیف اختصاصی {percent}٪ برای مشتری {target_id} ذخیره شد.\n"
+                          "از سفارش‌های جدید این مشتری اعمال می‌شود؛ سفارش‌های قبلی تغییر نمی‌کنند.")
+            else:
+                result = (f"✅ تخفیف اختصاصی مشتری {target_id} حذف شد.\n"
+                          "از این پس تخفیف عمومی (در صورت فعال بودن) برای او محاسبه می‌شود.")
+            await update.message.reply_text(result, reply_markup=admin_panel_markup())
+            return
+
     if context.user_data.get("wallet_topup_waiting"):
         if txt in ("لغو", "انصراف", "❌ لغو"):
             context.user_data.pop("wallet_topup_waiting", None)
@@ -2389,20 +2517,46 @@ async def admin_panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             await message.reply_text("⛔ این پنل فقط برای ادمین‌های مجاز است.")
         return
     await message.reply_text(
-        "🛡 پنل مخفی مدیریت SpeedCon\n\n"
-        "این پنل فقط برای ادمین‌های ثبت‌شده نمایش داده می‌شود. از دکمه‌ها برای ابزارهای رایج استفاده کن.",
+        "🛡 پنل مدیریت SpeedCon\n\n"
+        "از گزینه‌ها برای مدیریت سرورها، تعرفه‌ها و وضعیت ربات استفاده کن.",
         reply_markup=admin_panel_markup(),
     )
 
 
 def admin_panel_markup():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🗂 سفارش‌ها", callback_data="adminpanel:orders"), InlineKeyboardButton("💰 تعرفه‌ها", callback_data="adminpanel:prices")],
-        [InlineKeyboardButton("🛠 فعال‌کردن آپدیت", callback_data="adminpanel:update"), InlineKeyboardButton("🟢 آنلاین‌کردن", callback_data="adminpanel:online")],
-        [InlineKeyboardButton("🧩 وضعیت بخش‌ها", callback_data="adminpanel:sections"), InlineKeyboardButton("👮 فهرست ادمین‌ها", callback_data="adminpanel:admins")],
-        [InlineKeyboardButton("📣 راهنمای پیام همگانی", callback_data="adminpanel:broadcast"), InlineKeyboardButton("➕ افزودن ادمین", callback_data="adminpanel:addadmin")],
-        [InlineKeyboardButton("🔄 تازه‌سازی پنل", callback_data="adminpanel:refresh"), InlineKeyboardButton("✖️ بستن پنل", callback_data="adminpanel:close")],
+        [InlineKeyboardButton("🖥 مدیریت پنل‌های سرور", callback_data="adminpanel:servers")],
+        [InlineKeyboardButton("💰 تغییر قیمت سرویس‌ها", callback_data="adminpanel:price_menu"), InlineKeyboardButton("📃 مشاهده تعرفه‌ها", callback_data="adminpanel:prices")],
+        [InlineKeyboardButton("🏷 تخفیف اختصاصی مشتری", callback_data="adminpanel:discount_menu")],
+        [InlineKeyboardButton("📦 سفارش‌های اخیر", callback_data="adminpanel:orders")],
+        [InlineKeyboardButton("🔒 بستن همه پنل‌ها", callback_data="adminpanel:close_all")],
+        [InlineKeyboardButton("🔓 باز کردن همه پنل‌ها", callback_data="adminpanel:open_all")],
+        [InlineKeyboardButton("🛠 فعال‌کردن حالت آپدیت", callback_data="adminpanel:update"), InlineKeyboardButton("🟢 آنلاین‌کردن ربات", callback_data="adminpanel:online")],
+        [InlineKeyboardButton("📊 وضعیت فعلی", callback_data="adminpanel:sections")],
+        [InlineKeyboardButton("👮 ادمین‌ها", callback_data="adminpanel:admins"), InlineKeyboardButton("✖️ بستن پنل", callback_data="adminpanel:close")],
     ])
+
+
+def admin_servers_markup():
+    settings = load_section_settings()
+    rows = []
+    for product, key in PANEL_SECTION_KEYS.items():
+        closed = key in settings
+        label = "🔓 بازکردن" if closed else "🔒 بستن"
+        status = "🔴 بسته" if closed else "🟢 باز"
+        rows.append([InlineKeyboardButton(f"{status} | {product}", callback_data=f"adminpanel:noop"),
+                     InlineKeyboardButton(label, callback_data=f"adminpanel:toggle:{key}")])
+    rows.append([InlineKeyboardButton("⬅️ بازگشت به پنل", callback_data="adminpanel:refresh")])
+    return InlineKeyboardMarkup(rows)
+
+
+def admin_price_markup():
+    rows = []
+    for product_index, (product, tiers) in enumerate(PRODUCTS.items()):
+        for tier_index, (label, price) in enumerate(tiers):
+            rows.append([InlineKeyboardButton(f"{product} | {label}: {money(price)} تومان", callback_data=f"adminpanel:price:{product_index}:{tier_index}")])
+    rows.append([InlineKeyboardButton("⬅️ بازگشت به پنل", callback_data="adminpanel:refresh")])
+    return InlineKeyboardMarkup(rows)
 
 
 async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2413,6 +2567,9 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     await query.answer()
     action = query.data.split(":", 1)[1]
+
+    if action == "noop":
+        return
     if action == "close":
         try:
             await query.edit_message_text("پنل مدیریت بسته شد.", reply_markup=None)
@@ -2420,8 +2577,79 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             pass
         return
     if action == "refresh":
-        await query.edit_message_text("🛡 پنل مخفی مدیریت SpeedCon\n\nابزارهای مدیریتی:", reply_markup=admin_panel_markup())
+        await query.edit_message_text("🛡 پنل مدیریت SpeedCon\n\nیک ابزار را انتخاب کن:", reply_markup=admin_panel_markup())
         return
+    if action == "servers":
+        await query.edit_message_text("🖥 مدیریت پنل‌های سرور\n\nوضعیت هر سرور را ببین و با دکمه کنارش باز یا بسته کن.", reply_markup=admin_servers_markup())
+        return
+    if action == "price_menu":
+        await query.edit_message_text("💰 برای تغییر قیمت، سرویس و تعرفه موردنظر را انتخاب کن:", reply_markup=admin_price_markup())
+        return
+    if action == "discount_menu":
+        context.user_data["admin_discount_stage"] = "user_id"
+        context.user_data.pop("admin_discount_target", None)
+        await query.edit_message_text(
+            "🏷 تخفیف اختصاصی مشتری\n\n"
+            "ابتدا آیدی عددی مشتری را بفرست.\n"
+            "بعد از آن درصد تخفیف را می‌پرسم.\n\n"
+            "برای حذف تخفیف اختصاصی، درصد ۰ را وارد کن. برای لغو بنویس: لغو",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو", callback_data="adminpanel:discount_cancel")]])
+        )
+        return
+    if action == "discount_cancel":
+        context.user_data.pop("admin_discount_stage", None)
+        context.user_data.pop("admin_discount_target", None)
+        await query.edit_message_text("تغییر تخفیف لغو شد.", reply_markup=admin_panel_markup())
+        return
+    if action.startswith("toggle:"):
+        key = action.split(":", 1)[1]
+        if key not in PANEL_SECTION_KEYS.values():
+            await query.edit_message_text("⛔ بخش نامعتبر است.", reply_markup=admin_panel_markup())
+            return
+        settings = load_section_settings()
+        if key in settings:
+            settings.pop(key, None)
+            status = "باز شد 🟢"
+        else:
+            settings[key] = {"message": "این پنل موقتاً بسته است. لطفاً بعداً دوباره تلاش کنید."}
+            status = "بسته شد 🔒"
+        save_section_settings(settings)
+        await query.edit_message_text(f"✅ پنل {SECTION_NAMES.get(key, key)} {status}.", reply_markup=admin_servers_markup())
+        return
+    if action == "close_all":
+        settings = load_section_settings()
+        for key in PANEL_SECTION_KEYS.values():
+            settings[key] = {"message": "پنل سرویس‌ها موقتاً در حال بروزرسانی است. لطفاً بعداً مراجعه کنید."}
+        save_section_settings(settings)
+        await query.edit_message_text("🔒 تمام پنل‌های سرور بسته شدند.", reply_markup=admin_panel_markup())
+        return
+    if action == "open_all":
+        settings = load_section_settings()
+        for key in PANEL_SECTION_KEYS.values():
+            settings.pop(key, None)
+        save_section_settings(settings)
+        await query.edit_message_text("🔓 تمام پنل‌های سرور باز شدند.", reply_markup=admin_panel_markup())
+        return
+    if action.startswith("price:"):
+        try:
+            _, product_index, tier_index = action.split(":")
+            product_index, tier_index = int(product_index), int(tier_index)
+            product = list(PRODUCTS)[product_index]
+            label, current_price = PRODUCTS[product][tier_index]
+        except (ValueError, IndexError, KeyError):
+            await query.edit_message_text("تعرفه انتخاب‌شده معتبر نیست.", reply_markup=admin_price_markup())
+            return
+        context.user_data["admin_price_edit"] = {"product": product, "tier_index": tier_index}
+        await query.edit_message_text(
+            f"✏️ تغییر قیمت\n\nسرویس: {product}\nتعرفه: {label}\nقیمت فعلی: {money(current_price)} تومان\n\nقیمت جدید را فقط با عدد به تومان بفرست. برای لغو بنویس: لغو",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ لغو تغییر قیمت", callback_data="adminpanel:price_cancel")]])
+        )
+        return
+    if action == "price_cancel":
+        context.user_data.pop("admin_price_edit", None)
+        await query.edit_message_text("تغییر قیمت لغو شد.", reply_markup=admin_panel_markup())
+        return
+
     if action == "orders":
         db = load_db()
         orders = sorted(db.get("orders", {}).values(), key=lambda o: int(o.get("id", 0)), reverse=True)
@@ -2439,28 +2667,24 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             lines.extend(f"• {label}: {money(price)}" for label, price in tiers)
         result = "\n".join(lines)
     elif action == "update":
-        data = load_access_data()
-        data["maintenance"] = True
-        save_access_data(data)
-        result = "🛠 حالت بروزرسانی فعال شد. کاربران عادی پیام نگهداری می‌بینند."
+        data = load_access_data(); data["maintenance"] = True; save_access_data(data)
+        result = "🛠 حالت آپدیت فعال شد؛ کاربران عادی پیام نگهداری می‌بینند."
     elif action == "online":
-        data = load_access_data()
-        data["maintenance"] = False
-        save_access_data(data)
-        result = "🟢 ربات به حالت عادی برگشت."
+        data = load_access_data(); data["maintenance"] = False; save_access_data(data)
+        result = "🟢 حالت آپدیت غیرفعال شد و ربات آنلاین است."
     elif action == "sections":
         data = load_section_settings()
-        lines = ["🧩 وضعیت بخش‌ها:"]
+        lines = ["📊 وضعیت فعلی ربات:", "حالت آپدیت: " + ("🔴 فعال" if load_access_data().get("maintenance") else "🟢 غیرفعال")]
         for key, name in SECTION_NAMES.items():
-            lines.append(f"{'🔴 بسته' if key in data else '🟢 باز'} — {key}: {name}")
+            lines.append(f"{'🔴 بسته' if key in data else '🟢 باز'} — {name}")
         result = "\n".join(lines)
     elif action == "admins":
         ids = sorted(load_admin_ids())
         result = "👮 ادمین‌های مجاز:\n" + "\n".join(f"{i}. {admin_id}" + (" (مدیر اصلی)" if admin_id == ADMIN_ID else "") for i, admin_id in enumerate(ids, 1))
     elif action == "broadcast":
-        result = "📣 برای ارسال پیام همگانی این دستور را در چت خصوصی ربات بفرست:\n/broadcast متن پیام\n\nاین پیام برای کاربران ثبت‌شده ارسال می‌شود؛ قبل از ارسال، متن را بررسی کن."
+        result = "📣 برای ارسال پیام همگانی دستور /broadcast متن پیام را در چت خصوصی ربات بفرست."
     elif action == "addadmin":
-        result = "➕ افزودن ادمین دوم:\nفقط مدیر اصلی می‌تواند این کار را انجام دهد. دستور را با آیدی عددی ادمین دوم بفرست:\n/addadmin 123456789\n\nبرای امنیت، آیدی نمونه بالا را اجرا نکن؛ آن را با آیدی واقعی جایگزین کن."
+        result = "➕ افزودن ادمین دوم فقط توسط مدیر اصلی: /addadmin آیدی_عددی"
     else:
         result = "گزینه نامعتبر است."
     try:
@@ -2804,7 +3028,7 @@ def main():
     app.add_handler(CommandHandler("removeadmin", removeadmin_command))
     app.add_handler(CommandHandler("admins", admins_command))
     app.add_handler(CommandHandler("admin", admin_panel_command))
-    app.add_handler(CallbackQueryHandler(admin_panel_callback, pattern=r"^adminpanel:(orders|prices|update|online|sections|admins|broadcast|addadmin|refresh|close)$"))
+    app.add_handler(CallbackQueryHandler(admin_panel_callback, pattern=r"^adminpanel:(orders|prices|update|online|sections|admins|broadcast|addadmin|refresh|close|servers|price_menu|discount_menu|discount_cancel|close_all|open_all|noop|toggle:(gaming|v2ray|unlimited)|price_cancel|price:\d+:\d+)$"))
     app.add_handler(CommandHandler("setdiscount", setdiscount_command))
     app.add_handler(CommandHandler("discount_user", discount_user_command))
     app.add_handler(CommandHandler("discount", discount_command))
