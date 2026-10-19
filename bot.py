@@ -1351,78 +1351,100 @@ async def start_config_delivery_callback(update: Update, context: ContextTypes.D
         await query.answer("این سفارش آماده تحویل کانفیگ نیست.", show_alert=True)
         return
     context.user_data["config_order_id"] = order_id
+    context.user_data["config_delivery_step"] = "link"
+    context.user_data.pop("config_delivery_link", None)
     context.user_data.pop("pending_config_delivery", None)
     context.user_data.pop("support_reply_target", None)
     await query.answer()
     await query.message.reply_text(
-        f"✍️ ارسال مستقیم کانفیگ سفارش #{order.get('order_number', order_id)} فعال شد.\n"
-        f"👤 مشتری: {order.get('customer_name', '—')} | 🆔 {order.get('user_id')}\n"
-        f"📦 سرویس: {order.get('panel', '—')} — {order.get('product', '—')}\n\n"
-        "حالا متن کانفیگ یا فایل آن (مثل فایل WireGuard/V2Ray) را همین‌جا بفرست. "
-        "به‌محض ارسال، بدون دکمه تأیید اضافه برای همین مشتری فرستاده می‌شود.\n"
-        "برای لغو، کلمه «لغو» را بفرست."
+        f"📤 تحویل سرویس سفارش #{order.get('order_number', order_id)}\n"
+        f"👤 مشتری: {order.get('customer_name', '—')} | 🆔 آیدی عددی: {order.get('user_id')}\n"
+        f"📦 محصول: {order.get('panel', '—')} — {order.get('product', '—')}\n"
+        f"🏷 نام انتخابی مشتری: {order.get('service_name') or 'سرویس'}\n\n"
+        "مرحله ۱: لینک سرور یا متن کانفیگ را بفرست.\n"
+        "مرحله ۲: عکس QR را جداگانه بفرست تا هر دو جدا برای مشتری ارسال و ذخیره شوند.\n"
+        "اگر QR نداری، بعد از لینک بنویس «بدون QR». برای لغو بنویس «لغو»."
     )
 
 
 async def deliver_config_content(update: Update, context: ContextTypes.DEFAULT_TYPE, kind: str):
-    """Send the next admin text/file directly to the selected customer's approved order."""
+    """Collect link/config and optional QR, then save and deliver them separately."""
     message = update.effective_message
     if not message or not update.effective_user or not is_admin(update.effective_user.id):
         return False
     order_id = context.user_data.get("config_order_id")
     if not order_id:
         return False
+    step = context.user_data.get("config_delivery_step", "link")
     if kind == "text":
         body = (message.text or "").strip()
         if body in ("لغو", "انصراف", "/cancel"):
-            context.user_data.pop("config_order_id", None)
-            await message.reply_text("ارسال کانفیگ لغو شد؛ سفارش همچنان در انتظار کانفیگ است.")
+            for key in ("config_order_id", "config_delivery_step", "config_delivery_link"):
+                context.user_data.pop(key, None)
+            await message.reply_text("تحویل لغو شد؛ سفارش همچنان در انتظار تحویل باقی ماند.")
             return True
+        if step == "qr":
+            if body not in ("بدون QR", "ندارم", "skipqr", "/skipqr"):
+                await message.reply_text("الان عکس QR را بفرست یا برای ادامه بدون QR بنویس «بدون QR».")
+                return True
+            return await _finish_config_delivery(update, context, order_id, None)
         if not body:
-            await message.reply_text("متن کانفیگ خالی است؛ متن یا فایل را بفرستید.")
+            await message.reply_text("لینک یا متن کانفیگ خالی است؛ دوباره بفرست.")
             return True
+        context.user_data["config_delivery_link"] = body
+        context.user_data["config_delivery_step"] = "qr"
+        await message.reply_text("✅ لینک/متن کانفیگ دریافت شد. حالا عکس QR را جداگانه بفرست؛ اگر نداری بنویس «بدون QR».")
+        return True
+    if step != "qr":
+        await message.reply_text("اول لینک یا متن کانفیگ را بفرست؛ بعد عکس QR را ارسال کن.")
+        return True
+    if not (message.photo or message.document):
+        await message.reply_text("برای QR لطفاً عکس ارسال کن؛ یا بنویس «بدون QR».")
+        return True
+    qr_file_id = message.photo[-1].file_id if message.photo else message.document.file_id
+    return await _finish_config_delivery(update, context, order_id, qr_file_id)
+
+
+async def _finish_config_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE, order_id, qr_file_id=None):
+    message = update.effective_message
     db = load_db()
     order = db.get("orders", {}).get(str(order_id))
     if not order or order.get("status") != "رسید تأییدشده؛ در انتظار کانفیگ":
-        context.user_data.pop("config_order_id", None)
-        await message.reply_text("این سفارش دیگر آماده تحویل کانفیگ نیست.")
+        for key in ("config_order_id", "config_delivery_step", "config_delivery_link"):
+            context.user_data.pop(key, None)
+        await message.reply_text("این سفارش دیگر آماده تحویل نیست.")
+        return True
+    link = (context.user_data.get("config_delivery_link") or "").strip()
+    if not link:
+        await message.reply_text("لینک/متن کانفیگ ثبت نشده؛ دوباره از دکمه «ارسال سرور» شروع کن.")
         return True
     customer_id = int(order["user_id"])
+    service_name = str(order.get("service_name") or order.get("panel") or "سرویس").strip()[:50]
     try:
-        await context.bot.send_message(
-            chat_id=customer_id,
-            text=f"🎉 اطلاعات سرویس سفارش #{order.get('order_number', order_id)} از طرف پشتیبانی:"
-        )
-        if kind == "text":
-            await context.bot.send_message(chat_id=customer_id, text=body)
+        await context.bot.send_message(chat_id=customer_id, text=f"🎉 سرویس «{service_name}» آماده است\n🧾 سفارش #{order.get('order_number', order_id)}")
+        if link.startswith(("https://", "http://")):
+            await context.bot.send_message(chat_id=customer_id, text=f"🔗 لینک سرویس «{service_name}»:\n{link}", disable_web_page_preview=True)
         else:
-            await context.bot.copy_message(
-                chat_id=customer_id,
-                from_chat_id=message.chat_id,
-                message_id=message.message_id,
-            )
-        try:
-            await context.bot.send_message(
-                chat_id=customer_id,
-                text=f"✅ سفارش #{order.get('order_number', order_id)} با موفقیت تحویل داده شد. ممنون از خرید شما!"
-            )
-        except TelegramError:
-            logger.warning("Config sent but final confirmation failed for order %s", order_id)
+            await context.bot.send_message(chat_id=customer_id, text=f"🔗 متن کانفیگ سرویس «{service_name}»:\n{link}")
+        if qr_file_id:
+            await context.bot.send_photo(chat_id=customer_id, photo=qr_file_id, caption=f"📷 QR سرویس «{service_name}» — جدا از لینک")
+        await context.bot.send_message(chat_id=customer_id, text="✅ سرویس در بخش «سرویس‌های من» ذخیره شد. برای تمدید، همان نام سرویس را انتخاب کن.")
     except Exception:
-        logger.exception("Failed to deliver config for order %s", order_id)
-        await message.reply_text(
-            "❌ ارسال به مشتری ناموفق بود. مطمئن شوید مشتری ربات را Start کرده باشد. "
-            "سفارش همچنان در انتظار کانفیگ است؛ می‌توانید دوباره تلاش کنید."
-        )
+        logger.exception("Failed to deliver service info for order %s", order_id)
+        await message.reply_text("❌ ارسال برای مشتری ناموفق بود. سفارش در انتظار تحویل ماند؛ مطمئن شو مشتری ربات را Start کرده باشد.")
         return True
+    order["service_name"] = service_name
+    order["server_link"] = link if link.startswith(("https://", "http://")) else ""
+    order["config_text"] = link
+    order["server_qr_file_id"] = qr_file_id
     order["status"] = "کانفیگ تحویل داده شد"
     order["config_sent"] = True
     order["config_sent_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     order["config_sent_by"] = update.effective_user.id
     save_db(db)
-    context.user_data.pop("config_order_id", None)
-    context.user_data.pop("pending_config_delivery", None)
-    await message.reply_text(f"✅ کانفیگ سفارش #{order.get('order_number', order_id)} مستقیم برای مشتری ارسال شد.")
+    for key in ("config_order_id", "config_delivery_step", "config_delivery_link", "pending_config_delivery"):
+        context.user_data.pop(key, None)
+    await message.reply_text(f"✅ سرویس «{service_name}» برای مشتری با آیدی عددی {customer_id} تحویل و ذخیره شد. لینک و QR جداگانه ارسال شدند.")
     return True
 
 
@@ -1465,6 +1487,10 @@ async def sendconfig_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
     context.user_data["config_order_id"] = order_id
+    context.user_data["config_delivery_step"] = "link"
+    context.user_data.pop("config_delivery_link", None)
+    context.user_data["config_delivery_step"] = "link"
+    context.user_data.pop("config_delivery_link", None)
     context.user_data.pop("pending_config_delivery", None)
     context.user_data.pop("support_reply_target", None)
     customer_username = str(order.get("username", "")).lstrip("@")
@@ -1473,7 +1499,7 @@ async def sendconfig_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"✍️ ارسال مستقیم کانفیگ سفارش #{order.get('order_number', order_id)} فعال شد.\n"
         f"👤 مشتری: {order.get('customer_name', '—')} | 🆔 {stored_customer_id}\n"
         f"📦 سرویس: {order.get('panel', '—')} — {order.get('product', '—')}\n\n"
-        "متن یا فایل کانفیگ را در پیام بعدی بفرست؛ خودکار برای مشتری ارسال می‌شود.",
+        "مرحله ۱: لینک/متن کانفیگ را بفرست. مرحله ۲: عکس QR را جداگانه بفرست یا بنویس «بدون QR». برای لغو بنویس «لغو».",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("👤 رفتن به پیوی مشتری", url=customer_url)]])
     )
 
@@ -1552,6 +1578,62 @@ async def my_service_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         [InlineKeyboardButton("📋 دریافت دوباره اطلاعات سرویس", callback_data=f"service_info:{order_id}")],
         [InlineKeyboardButton("🔙 سرویس‌های من", callback_data="myservices_page:0")],
     ]))
+
+
+async def service_info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    try:
+        order_id = str(int(query.data.split(":", 1)[1]))
+    except (ValueError, IndexError):
+        await query.message.reply_text("شناسه سرویس معتبر نیست.")
+        return
+    order = load_db().get("orders", {}).get(order_id)
+    if not order or order.get("user_id") != query.from_user.id or not order.get("config_sent"):
+        await query.message.reply_text("این سرویس پیدا نشد یا متعلق به شما نیست.")
+        return
+    name = order.get("service_name") or order.get("panel") or "سرویس"
+    link = order.get("server_link") or ""
+    config_text = order.get("config_text") or ""
+    await query.message.reply_text(
+        f"📱 اطلاعات ذخیره‌شده سرویس\n🏷 نام: {name}\n🧾 سفارش: #{order.get('order_number', order_id)}\n"
+        f"📦 نوع: {order.get('panel', '—')}\n🔹 محصول: {order.get('product', '—')}\n"
+        f"🔗 لینک: {'ذخیره شده' if link else 'متن کانفیگ ذخیره شده' if config_text else 'ثبت نشده'}\n📷 QR: {'ذخیره شده' if order.get('server_qr_file_id') else 'ثبت نشده'}"
+    )
+    if link:
+        await context.bot.send_message(chat_id=query.from_user.id, text=f"🔗 لینک سرویس «{name}»:\n{link}", disable_web_page_preview=True)
+    elif config_text:
+        await context.bot.send_message(chat_id=query.from_user.id, text=f"🔗 متن کانفیگ سرویس «{name}»:\n{config_text}")
+    if order.get("server_qr_file_id"):
+        await context.bot.send_photo(chat_id=query.from_user.id, photo=order["server_qr_file_id"], caption=f"📷 QR سرویس «{name}»")
+
+
+async def service_info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    try:
+        order_id = str(int(query.data.split(":", 1)[1]))
+    except (ValueError, IndexError):
+        await query.message.reply_text("شناسه سرویس معتبر نیست.")
+        return
+    order = load_db().get("orders", {}).get(order_id)
+    if not order or order.get("user_id") != query.from_user.id or not order.get("config_sent"):
+        await query.message.reply_text("این سرویس پیدا نشد یا متعلق به شما نیست.")
+        return
+    name = order.get("service_name") or order.get("panel") or "سرویس"
+    link = order.get("server_link") or ""
+    config_text = order.get("config_text") or ""
+    await query.message.reply_text(
+        f"📱 اطلاعات ذخیره‌شده سرویس\n🏷 نام: {name}\n🧾 سفارش: #{order.get('order_number', order_id)}\n"
+        f"📦 نوع: {order.get('panel', '—')}\n🔹 محصول: {order.get('product', '—')}\n"
+        f"🔗 لینک: {'ذخیره شده' if link else 'متن کانفیگ ذخیره شده' if config_text else 'ثبت نشده'}\n📷 QR: {'ذخیره شده' if order.get('server_qr_file_id') else 'ثبت نشده'}"
+    )
+    if link:
+        await context.bot.send_message(chat_id=query.from_user.id, text=f"🔗 لینک سرویس «{name}»:\n{link}", disable_web_page_preview=True)
+    elif config_text:
+        await context.bot.send_message(chat_id=query.from_user.id, text=f"🔗 متن کانفیگ سرویس «{name}»:\n{config_text}")
+    if order.get("server_qr_file_id"):
+        await context.bot.send_photo(chat_id=query.from_user.id, photo=order["server_qr_file_id"], caption=f"📷 QR سرویس «{name}»")
 
 
 async def my_services_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3337,6 +3419,8 @@ def main():
     app.add_handler(CallbackQueryHandler(panel_callback, pattern=r"^(panel:\d+|back|back_to_panels|product:\d+)$"))
     app.add_handler(CallbackQueryHandler(order_callback, pattern=r"^(confirm_order|cancel_order)$"))
     app.add_handler(CallbackQueryHandler(my_service_callback, pattern=r"^myservice:\d+$"))
+    app.add_handler(CallbackQueryHandler(service_info_callback, pattern=r"^service_info:\d+$"))
+    app.add_handler(CallbackQueryHandler(service_info_callback, pattern=r"^service_info:\d+$"))
     app.add_handler(CallbackQueryHandler(my_service_callback, pattern=r"^service_info:\d+$"))
     app.add_handler(CallbackQueryHandler(my_services_page_callback, pattern=r"^myservices_page:\d+$"))
     app.add_handler(CallbackQueryHandler(renew_service_callback, pattern=r"^renew_service:\d+$"))
