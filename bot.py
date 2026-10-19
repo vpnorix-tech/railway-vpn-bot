@@ -64,7 +64,7 @@ logger = logging.getLogger(__name__)
 # Turkey VIP server was discontinued and is intentionally removed from the shop.
 PRODUCTS = {
     "🎮 سرور وایرگاد گیمینگ VIP": [
-        ("هر گیگابایت", 8000),
+        ("هر گیگابایت", 6000),
     ],
     "🌐 سرور وب‌گردی V2Ray": [
         ("هر گیگابایت", 5000),
@@ -441,6 +441,53 @@ async def access_gate(update, context):
         return True
     return False
 
+
+
+async def support_reply_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Let an admin reply to a support/dealership request without typing /senduser."""
+    query = update.callback_query
+    if not is_admin(query.from_user.id):
+        await query.answer("این گزینه فقط برای ادمین است.", show_alert=True)
+        return
+    try:
+        target_id = int(query.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        await query.answer("شناسه مشتری نامعتبر است.", show_alert=True)
+        return
+    context.user_data["support_reply_target"] = target_id
+    context.user_data.pop("config_order_id", None)
+    context.user_data.pop("pending_config_delivery", None)
+    await query.answer()
+    await query.message.reply_text(
+        f"✍️ حالت پاسخ مستقیم فعال شد.\nمشتری: {target_id}\n\n"
+        "حالا فقط متن پاسخ را در همین چت بفرست تا مستقیم برای مشتری ارسال شود.\n"
+        "برای لغو، کلمه «لغو» را بفرست."
+    )
+
+
+async def deliver_support_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Consume the next admin text as a direct customer reply."""
+    target_id = context.user_data.get("support_reply_target")
+    message = update.effective_message
+    if not target_id or not message or not update.effective_user or not is_admin(update.effective_user.id):
+        return False
+    body = (message.text or "").strip()
+    if body in ("لغو", "انصراف"):
+        context.user_data.pop("support_reply_target", None)
+        await message.reply_text("پاسخ مستقیم لغو شد.")
+        return True
+    if not body:
+        await message.reply_text("لطفاً متن پاسخ را به‌صورت پیام متنی بفرستید.")
+        return True
+    try:
+        await context.bot.send_message(chat_id=int(target_id), text=body)
+    except TelegramError:
+        logger.exception("Could not send direct support reply to %s", target_id)
+        await message.reply_text("❌ پیام ارسال نشد. ممکن است مشتری ربات را شروع نکرده یا مسدود کرده باشد.")
+        return True
+    context.user_data.pop("support_reply_target", None)
+    await message.reply_text(f"✅ پاسخ مستقیماً برای مشتری {target_id} ارسال شد.")
+    return True
 
 
 async def senduser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1244,8 +1291,11 @@ async def handle_config_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data["pending_config_delivery"] = {
         "order_id": str(order_id), "kind": "text", "text": text_value,
     }
+    customer = order.get("user_id")
+    customer_url = f"tg://user?id={customer}"
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📩 ارسال به پیوی مشتری", callback_data=f"deliver_config:{order_id}")],
+        [InlineKeyboardButton("📩 ارسال مستقیم کانفیگ به مشتری", callback_data=f"deliver_config:{order_id}")],
+        [InlineKeyboardButton("👤 رفتن به پیوی مشتری", url=customer_url)],
         [InlineKeyboardButton("❌ لغو ارسال", callback_data=f"cancel_config_delivery:{order_id}")],
     ])
     await update.effective_message.reply_text(
@@ -1277,8 +1327,11 @@ async def handle_config_media(update: Update, context: ContextTypes.DEFAULT_TYPE
         "order_id": str(order_id), "kind": "copy_message",
         "chat_id": message.chat_id, "message_id": message.message_id,
     }
+    customer = order.get("user_id")
+    customer_url = f"tg://user?id={customer}"
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📩 ارسال به پیوی مشتری", callback_data=f"deliver_config:{order_id}")],
+        [InlineKeyboardButton("📩 ارسال مستقیم کانفیگ به مشتری", callback_data=f"deliver_config:{order_id}")],
+        [InlineKeyboardButton("👤 رفتن به پیوی مشتری", url=customer_url)],
         [InlineKeyboardButton("❌ لغو ارسال", callback_data=f"cancel_config_delivery:{order_id}")],
     ])
     await message.reply_text(
@@ -1778,6 +1831,10 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("لطفاً عکس رسید واریز را به‌صورت تصویر ارسال کنید؛ یا برای لغو بنویسید «لغو».")
         return
 
+    # A selected support reply takes priority over config delivery and customer flows.
+    if await deliver_support_reply(update, context):
+        return
+
     # Important: prioritize an admin's staged config delivery before customer flows
     # (service naming, support, quantities, etc.) can intercept the message.
     if await handle_config_text(update, context):
@@ -1848,18 +1905,24 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             subject = "🤝 درخواست جدید نمایندگی"
             body = txt
+        target_id = user.id if user else 0
         admin_text = (
             f"{subject}\n\n"
             f"👤 نام: {display_name}\n"
             f"🔗 نام کاربری: {username}\n"
-            f"🆔 آیدی عددی: {user.id if user else 'نامشخص'}\n\n"
-            f"📝 متن درخواست:\n{body[:3500]}\n\n"
-            f"برای پاسخ: /senduser {user.id if user else 0} متن پیام"
+            f"🆔 آیدی عددی: {target_id}\n\n"
+            f"📝 متن درخواست:\n{body[:3500]}"
         )
+        username_value = (user.username if user else None)
+        private_url = f"https://t.me/{username_value}" if username_value else f"tg://user?id={target_id}"
+        admin_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✍️ ۱. جواب دادن مستقیم", callback_data=f"support_reply:{target_id}")],
+            [InlineKeyboardButton("👤 ۲. رفتن به پیوی مشتری", url=private_url)],
+        ])
         sent = 0
         for admin_id in load_admin_ids():
             try:
-                await context.bot.send_message(chat_id=admin_id, text=admin_text)
+                await context.bot.send_message(chat_id=admin_id, text=admin_text, reply_markup=admin_keyboard)
                 sent += 1
             except Exception:
                 logger.exception("Could not forward %s message from user %s to admin %s", contact_flow, user.id if user else None, admin_id)
@@ -2727,6 +2790,7 @@ def main():
     app.add_handler(CallbackQueryHandler(my_services_page_callback, pattern=r"^myservices_page:\d+$"))
     app.add_handler(CallbackQueryHandler(renew_service_callback, pattern=r"^renew_service:\d+$"))
     app.add_handler(CallbackQueryHandler(review_callback, pattern=r"^review:(approve|reject):\d+$"))
+    app.add_handler(CallbackQueryHandler(support_reply_callback, pattern=r"^support_reply:\d+$"))
     app.add_handler(CallbackQueryHandler(config_delivery_callback, pattern=r"^(deliver_config|cancel_config_delivery):\d+$"))
     app.add_handler(CallbackQueryHandler(market_callback, pattern=r"^market:"))
     app.add_handler(CallbackQueryHandler(virtual_service_callback, pattern=r"^virtual:\d+$"))
