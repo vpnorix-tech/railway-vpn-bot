@@ -729,6 +729,11 @@ def order_text(order):
     )
 
 
+def admin_order_actions(order_id):
+    """Two clear actions for an admin order card."""
+    return InlineKeyboardMarkup([[InlineKeyboardButton("📤 ارسال سرور", callback_data=f"order_action:send:{order_id}"), InlineKeyboardButton("❌ رد خرید", callback_data=f"order_action:reject:{order_id}")]])
+
+
 async def cancel_active_order(user_id, context):
     """Cancel the user's current unpaid order safely, if one exists."""
     order_id = context.user_data.get("active_receipt_order")
@@ -1066,7 +1071,7 @@ async def wallet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(f"✅ خرید با اعتبار انجام شد.\n🧾 سفارش: #{order_number}\n💸 مبلغ کسرشده: {money(amount)}\n💳 اعتبار باقی‌مانده: {money(balance-amount)}\n\nکانفیگ پس از آماده‌سازی توسط مدیریت ارسال می‌شود.", reply_markup=MAIN_MARKUP)
         for admin_id in load_admin_ids():
             try:
-                await context.bot.send_message(chat_id=admin_id, text=f"🛒 سفارش پرداخت‌شده با اعتبار\nسفارش: #{order_number} (شناسه داخلی {order_id})\nمشتری: {order['customer_name']}\nآیدی: {user.id}\nسرویس: {order.get('panel')} — {order.get('product')}\nنام انتخابی: {order.get('service_name', '—')}\nمبلغ: {money(amount)}\n\nبرای تحویل: /sendconfig {order_id}")
+                await context.bot.send_message(chat_id=admin_id, text="🛒 سفارش جدید — پرداخت از کیف پول تأیید شده\n\n" + order_text(order), reply_markup=admin_order_actions(order_id))
             except Exception: logger.exception("Could not notify admin about wallet purchase")
 
 
@@ -1166,13 +1171,8 @@ async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     order["status"] = "رسید ارسال‌شده؛ در انتظار بررسی"
     save_db(db)
 
-    admin_keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ تأیید رسید", callback_data=f"review:approve:{order_id}"),
-            InlineKeyboardButton("❌ رد رسید", callback_data=f"review:reject:{order_id}"),
-        ]
-    ])
-    caption = "📥 رسید پرداخت جدید\n\n" + order_text(order)
+    admin_keyboard = admin_order_actions(order_id)
+    caption = "📥 سفارش جدید — رسید کارت‌به‌کارت پیوست است\n\n" + order_text(order) + "\n\nاگر رسید معتبر است «ارسال سرور» را بزنید؛ در غیر این صورت «رد خرید»."
     try:
         for admin_id in sorted(load_admin_ids()):
             await context.bot.send_photo(
@@ -1217,6 +1217,59 @@ async def cancel_active_order_callback(update: Update, context: ContextTypes.DEF
     if context.user_data.get("active_receipt_order") == order_id:
         context.user_data.pop("active_receipt_order", None)
     await query.message.reply_text(f"✅ سفارش #{order.get('order_number', order_id)} لغو شد. دیگر رسیدی برای این سفارش ثبت نمی‌شود.", reply_markup=MAIN_MARKUP)
+
+
+async def order_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not is_admin(query.from_user.id):
+        await query.answer("این گزینه فقط برای ادمین است.", show_alert=True); return
+    try:
+        _, action, order_id = query.data.split(":", 2)
+        order_id = str(int(order_id))
+    except (ValueError, IndexError):
+        await query.answer("شناسه سفارش نامعتبر است.", show_alert=True); return
+    db = load_db(); order = db.get("orders", {}).get(order_id)
+    if not order:
+        await query.answer("سفارش پیدا نشد.", show_alert=True); return
+    if action == "send":
+        if order.get("status") not in ("رسید ارسال‌شده؛ در انتظار بررسی", "رسید تأییدشده؛ در انتظار کانفیگ"):
+            await query.answer("این سفارش قابل تحویل نیست یا قبلاً نهایی شده است.", show_alert=True); return
+        if order.get("status") == "رسید ارسال‌شده؛ در انتظار بررسی":
+            order["status"] = "رسید تأییدشده؛ در انتظار کانفیگ"
+            order["reviewed_by"] = query.from_user.id
+            order["payment_reviewed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            save_db(db)
+            try: await context.bot.send_message(chat_id=int(order["user_id"]), text=f"✅ پرداخت سفارش #{order.get('order_number', order_id)} تأیید شد. سرور شما در حال آماده‌سازی است.")
+            except TelegramError: logger.warning("Could not notify customer about payment approval")
+        context.user_data["config_order_id"] = order_id
+        context.user_data.pop("pending_config_delivery", None)
+        await query.answer("سفارش انتخاب شد")
+        try: await query.edit_message_reply_markup(reply_markup=None)
+        except TelegramError: pass
+        await query.message.reply_text(f"📤 تحویل سفارش #{order.get('order_number', order_id)}\n👤 مشتری: {order.get('customer_name', '—')}\n🆔 آیدی عددی: {order.get('user_id')}\n📦 سرویس: {order.get('panel', '—')} — {order.get('product', '—')}\n🏷 نام انتخابی مشتری: {order.get('service_name', '—')}\n💵 مبلغ: {money(order.get('amount', 0))}\n\nمتن کانفیگ یا فایل سرور را همین‌جا بفرستید؛ مستقیماً برای همین مشتری ارسال می‌شود. برای لغو بنویسید «لغو»." )
+        return
+    if action == "reject":
+        if order.get("status") in ("کانفیگ تحویل داده شد", "رد خرید", "لغو‌شده توسط مشتری"):
+            await query.answer("این سفارش قبلاً نهایی شده است.", show_alert=True); return
+        order["status"] = "رد خرید"; order["rejected_by"] = query.from_user.id
+        order["rejected_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        refund_note = ""
+        if order.get("payment_method") == "wallet" and not order.get("wallet_refunded"):
+            wallet = load_wallet(); uid = str(order.get("user_id")); amount = int(order.get("amount", 0))
+            wallet.setdefault("balances", {})[uid] = wallet_balance(wallet, uid) + amount
+            wallet.setdefault("transactions", []).append({"user_id": int(uid), "type": "refund", "amount": amount, "order_id": int(order_id), "by": query.from_user.id, "at": datetime.now().isoformat(timespec="seconds")})
+            save_wallet(wallet); order["wallet_refunded"] = True
+            refund_note = f"\nمبلغ {money(amount)} به کیف پول مشتری برگشت داده شد."
+        save_db(db)
+        try: await context.bot.send_message(chat_id=int(order["user_id"]), text=f"❌ خرید سفارش #{order.get('order_number', order_id)} توسط مدیریت رد شد.{refund_note}\nبرای پیگیری با پشتیبانی تماس بگیرید.")
+        except TelegramError: logger.warning("Could not notify customer about rejected order")
+        context.user_data.pop("config_order_id", None)
+        await query.answer("خرید رد شد")
+        try: await query.edit_message_reply_markup(reply_markup=None)
+        except TelegramError: pass
+        await query.message.reply_text(f"❌ سفارش #{order.get('order_number', order_id)} رد شد.{refund_note}")
+        return
+    await query.answer("عملیات ناشناخته است.", show_alert=True)
 
 
 async def review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3284,8 +3337,10 @@ def main():
     app.add_handler(CallbackQueryHandler(panel_callback, pattern=r"^(panel:\d+|back|back_to_panels|product:\d+)$"))
     app.add_handler(CallbackQueryHandler(order_callback, pattern=r"^(confirm_order|cancel_order)$"))
     app.add_handler(CallbackQueryHandler(my_service_callback, pattern=r"^myservice:\d+$"))
+    app.add_handler(CallbackQueryHandler(my_service_callback, pattern=r"^service_info:\d+$"))
     app.add_handler(CallbackQueryHandler(my_services_page_callback, pattern=r"^myservices_page:\d+$"))
     app.add_handler(CallbackQueryHandler(renew_service_callback, pattern=r"^renew_service:\d+$"))
+    app.add_handler(CallbackQueryHandler(order_action_callback, pattern=r"^order_action:(send|reject):\d+$"))
     app.add_handler(CallbackQueryHandler(review_callback, pattern=r"^review:(approve|reject):\d+$"))
     app.add_handler(CallbackQueryHandler(support_reply_callback, pattern=r"^support_reply:\d+$"))
     app.add_handler(CallbackQueryHandler(start_config_delivery_callback, pattern=r"^config_start:\d+$"))
