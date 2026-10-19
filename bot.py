@@ -64,7 +64,7 @@ logger = logging.getLogger(__name__)
 # Turkey VIP server was discontinued and is intentionally removed from the shop.
 PRODUCTS = {
     "🎮 سرور وایرگاد گیمینگ VIP": [
-        ("هر گیگابایت", 6000),
+        ("هر گیگابایت", 8000),
     ],
     "🌐 سرور وب‌گردی V2Ray": [
         ("هر گیگابایت", 5000),
