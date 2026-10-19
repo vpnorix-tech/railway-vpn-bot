@@ -37,7 +37,7 @@ from telegram.ext import (
 # Set these in your environment or replace BOT_TOKEN locally with a NEW token.
 # The token previously included in the uploaded file should be revoked in @BotFather.
 BOT_TOKEN = os.getenv("BOT_TOKEN", "PASTE_NEW_BOT_TOKEN_HERE")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "8928341236"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "8867498958"))
 DB_FILE = Path(__file__).with_name("orders.json")
 MARKET_FILE = Path(__file__).with_name("game_account_listings.json")
 SECRETARY_FILE = Path(__file__).with_name("secretary_settings.json")
