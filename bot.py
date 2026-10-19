@@ -47,6 +47,7 @@ USERS_FILE = Path(__file__).with_name("users.json")
 ACCESS_FILE = Path(__file__).with_name("access_settings.json")
 SECTION_FILE = Path(__file__).with_name("section_settings.json")
 PRICE_FILE = Path(__file__).with_name("price_settings.json")
+PLAN_FILE = Path(__file__).with_name("plan_settings.json")
 TEST_FILE = Path(__file__).with_name("test_accounts.json")
 WALLET_FILE = Path(__file__).with_name("wallet.json")
 # Serializes test-pool updates so two nearly simultaneous requests cannot take the same link.
@@ -97,12 +98,29 @@ def load_price_overrides():
         for product, tiers in saved.items():
             if product not in PRODUCTS or not isinstance(tiers, dict):
                 continue
-            PRODUCTS[product] = [
-                (label, int(tiers.get(label, price)))
-                for label, price in PRODUCTS[product]
-            ]
+            existing = {label: int(price) for label, price in PRODUCTS[product]}
+            # Keep current default order, apply saved prices, then append admin-created tiers.
+            rebuilt = [(label, int(tiers.get(label, price))) for label, price in PRODUCTS[product]]
+            known = {label for label, _ in rebuilt}
+            for label, price in tiers.items():
+                if label not in known:
+                    rebuilt.append((str(label), int(price)))
+            PRODUCTS[product] = rebuilt
+        # Exact plan structure preserves admin additions, renames and deletions across restarts.
+        if PLAN_FILE.exists():
+            with PLAN_FILE.open("r", encoding="utf-8") as f:
+                saved_plans = json.load(f)
+            if isinstance(saved_plans, dict):
+                for product, tiers in saved_plans.items():
+                    if product in PRODUCTS and isinstance(tiers, list) and tiers:
+                        valid = []
+                        for item in tiers:
+                            if isinstance(item, dict) and "label" in item and "price" in item:
+                                valid.append((str(item["label"]), int(item["price"])))
+                        if valid:
+                            PRODUCTS[product] = valid
     except Exception:
-        logger.exception("Could not load saved price overrides")
+        logger.exception("Could not load saved price/plan overrides")
 
 
 def save_price_overrides():
@@ -114,6 +132,13 @@ def save_price_overrides():
     with tmp.open("w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     tmp.replace(PRICE_FILE)
+    # Keep exact plan ordering/structure so add, rename and delete survive restart.
+    plan_data = {product: [{"label": label, "price": int(price)} for label, price in tiers]
+                 for product, tiers in PRODUCTS.items()}
+    plan_tmp = PLAN_FILE.with_suffix(".tmp")
+    with plan_tmp.open("w", encoding="utf-8") as f:
+        json.dump(plan_data, f, ensure_ascii=False, indent=2)
+    plan_tmp.replace(PLAN_FILE)
 
 
 load_price_overrides()
@@ -1785,6 +1810,91 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     txt = (update.message.text or "").strip()
 
+    # Admin-only plan editor, broadcast and direct-message workflows.
+    if update.effective_user and is_admin(update.effective_user.id):
+        if txt in ("لغو", "انصراف", "❌ لغو") and any(k in context.user_data for k in ("admin_plan_flow", "admin_broadcast_waiting", "admin_sendone_stage")):
+            for k in ("admin_plan_flow", "admin_broadcast_waiting", "admin_broadcast_draft", "admin_sendone_stage", "admin_sendone_target", "admin_sendone_draft"):
+                context.user_data.pop(k, None)
+            await update.message.reply_text("عملیات لغو شد.", reply_markup=admin_panel_markup())
+            return
+        plan_flow = context.user_data.get("admin_plan_flow")
+        if plan_flow:
+            stage = plan_flow.get("stage"); product = plan_flow.get("product")
+            if product not in PRODUCTS:
+                context.user_data.pop("admin_plan_flow", None)
+                await update.message.reply_text("سرویس پیدا نشد؛ دوباره از پنل انتخاب کن.", reply_markup=admin_panel_markup()); return
+            if stage in ("add_label", "edit_label"):
+                label = txt.strip()
+                if not label or len(label) > 60:
+                    await update.message.reply_text("نام پلن باید بین ۱ تا ۶۰ نویسه باشد."); return
+                if stage == "add_label":
+                    if any(existing.lower() == label.lower() for existing, _ in PRODUCTS[product]):
+                        await update.message.reply_text("این نام پلن از قبل وجود دارد؛ نام دیگری انتخاب کن."); return
+                    plan_flow["new_label"] = label; plan_flow["stage"] = "add_price"
+                    await update.message.reply_text(f"نام پلن: {label}\nحالا مبلغ این پلن را به تومان فقط با عدد بفرست.")
+                    return
+                ti = int(plan_flow.get("tier_index", -1))
+                if not 0 <= ti < len(PRODUCTS[product]):
+                    context.user_data.pop("admin_plan_flow", None); await update.message.reply_text("پلن پیدا نشد.", reply_markup=admin_panel_markup()); return
+                if any(i != ti and existing.lower() == label.lower() for i, (existing, _) in enumerate(PRODUCTS[product])):
+                    await update.message.reply_text("این نام از قبل برای پلن دیگری استفاده شده."); return
+                old_label, old_price = PRODUCTS[product][ti]; PRODUCTS[product][ti] = (label, old_price)
+                save_price_overrides(); context.user_data.pop("admin_plan_flow", None)
+                await update.message.reply_text(f"✅ نام پلن تغییر کرد: {old_label} ← {label}", reply_markup=admin_plan_tiers_markup(int(plan_flow.get("product_index", 0))))
+                return
+            if stage in ("add_price", "edit_price"):
+                raw = normalize_digits(txt).replace(",", "").replace("٬", "").replace(" ", "")
+                if not raw.isdigit() or not 1 <= int(raw) <= 1000000000:
+                    await update.message.reply_text("مبلغ باید عددی بین ۱ تا ۱٬۰۰۰٬۰۰۰٬۰۰۰ تومان باشد."); return
+                amount = int(raw)
+                if stage == "add_price":
+                    label = plan_flow.get("new_label")
+                    PRODUCTS[product].append((label, amount))
+                    try: save_price_overrides()
+                    except Exception:
+                        PRODUCTS[product].pop(); logger.exception("Could not save new plan")
+                        await update.message.reply_text("ذخیره پلن ناموفق بود؛ فضای ذخیره‌سازی را بررسی کن."); return
+                    context.user_data.pop("admin_plan_flow", None)
+                    pi = list(PRODUCTS).index(product)
+                    await update.message.reply_text(f"✅ پلن «{label}» با قیمت {money(amount)} تومان اضافه شد.", reply_markup=admin_plan_tiers_markup(pi)); return
+                ti = int(plan_flow.get("tier_index", -1))
+                if not 0 <= ti < len(PRODUCTS[product]):
+                    context.user_data.pop("admin_plan_flow", None); await update.message.reply_text("پلن پیدا نشد.", reply_markup=admin_panel_markup()); return
+                label, old = PRODUCTS[product][ti]; PRODUCTS[product][ti] = (label, amount)
+                try: save_price_overrides()
+                except Exception:
+                    PRODUCTS[product][ti] = (label, old); logger.exception("Could not save plan price")
+                    await update.message.reply_text("ذخیره مبلغ ناموفق بود."); return
+                context.user_data.pop("admin_plan_flow", None)
+                await update.message.reply_text(f"✅ مبلغ پلن ذخیره شد: {label} — {money(old)} ← {money(amount)} تومان", reply_markup=admin_plan_tiers_markup(int(plan_flow.get("product_index", 0)))); return
+        if context.user_data.get("admin_broadcast_waiting"):
+            context.user_data.pop("admin_broadcast_waiting", None)
+            if not txt:
+                await update.message.reply_text("متن پیام خالی است؛ دوباره از پنل شروع کن.", reply_markup=admin_panel_markup()); return
+            context.user_data["admin_broadcast_draft"] = txt
+            await update.message.reply_text(f"پیش‌نمایش پیام همگانی برای {len(load_users())} عضو ثبت‌شده:\n\n{txt[:3000]}\n\nارسال شود؟", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ ارسال به همه", callback_data="adminpanel:broadcast_send"), InlineKeyboardButton("❌ لغو", callback_data="adminpanel:broadcast_cancel")]]))
+            return
+        sendone_stage = context.user_data.get("admin_sendone_stage")
+        if sendone_stage == "user_id":
+            normalized = normalize_digits(txt).strip()
+            if not normalized.isdigit() or int(normalized) <= 0:
+                await update.message.reply_text("آیدی عددی معتبر مشتری را بفرست؛ برای لغو بنویس لغو."); return
+            target = int(normalized)
+            if target not in load_users():
+                await update.message.reply_text("این آیدی در فهرست اعضای شناخته‌شده ربات نیست؛ آیدی را بررسی کن یا از مشتری بخواه /start بزند."); return
+            context.user_data["admin_sendone_target"] = target
+            context.user_data["admin_sendone_stage"] = "message"
+            await update.message.reply_text(f"✉️ آیدی مشتری: {target}\nحالا متن پیام را بفرست.")
+            return
+        if sendone_stage == "message":
+            target = context.user_data.get("admin_sendone_target")
+            if not txt:
+                await update.message.reply_text("متن پیام خالی است؛ متن را بفرست یا لغو کن."); return
+            context.user_data["admin_sendone_draft"] = txt
+            context.user_data.pop("admin_sendone_stage", None)
+            await update.message.reply_text(f"پیش‌نمایش پیام برای مشتری {target}:\n\n{txt[:3000]}\n\nارسال شود؟", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ ارسال پیام", callback_data="adminpanel:sendone_send"), InlineKeyboardButton("❌ لغو", callback_data="adminpanel:sendone_cancel")]]))
+            return
+
     # Admin price editor: only the admin who selected a tariff can complete the edit.
     pending_price = context.user_data.get("admin_price_edit")
     if pending_price:
@@ -2526,11 +2636,13 @@ async def admin_panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 def admin_panel_markup():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🖥 مدیریت پنل‌های سرور", callback_data="adminpanel:servers")],
+        [InlineKeyboardButton("🧩 افزودن / ویرایش پلن‌ها", callback_data="adminpanel:plans")],
         [InlineKeyboardButton("💰 تغییر قیمت سرویس‌ها", callback_data="adminpanel:price_menu"), InlineKeyboardButton("📃 مشاهده تعرفه‌ها", callback_data="adminpanel:prices")],
         [InlineKeyboardButton("🏷 تخفیف اختصاصی مشتری", callback_data="adminpanel:discount_menu")],
+        [InlineKeyboardButton("📣 ارسال پیام به همه اعضا", callback_data="adminpanel:broadcast_menu")],
+        [InlineKeyboardButton("✉️ ارسال پیام به یک مشتری", callback_data="adminpanel:sendone_menu")],
         [InlineKeyboardButton("📦 سفارش‌های اخیر", callback_data="adminpanel:orders")],
-        [InlineKeyboardButton("🔒 بستن همه پنل‌ها", callback_data="adminpanel:close_all")],
-        [InlineKeyboardButton("🔓 باز کردن همه پنل‌ها", callback_data="adminpanel:open_all")],
+        [InlineKeyboardButton("🔒 بستن همه پنل‌ها", callback_data="adminpanel:close_all"), InlineKeyboardButton("🔓 باز کردن همه پنل‌ها", callback_data="adminpanel:open_all")],
         [InlineKeyboardButton("🛠 فعال‌کردن حالت آپدیت", callback_data="adminpanel:update"), InlineKeyboardButton("🟢 آنلاین‌کردن ربات", callback_data="adminpanel:online")],
         [InlineKeyboardButton("📊 وضعیت فعلی", callback_data="adminpanel:sections")],
         [InlineKeyboardButton("👮 ادمین‌ها", callback_data="adminpanel:admins"), InlineKeyboardButton("✖️ بستن پنل", callback_data="adminpanel:close")],
@@ -2559,6 +2671,29 @@ def admin_price_markup():
     return InlineKeyboardMarkup(rows)
 
 
+def admin_plan_products_markup():
+    rows = []
+    for i, product in enumerate(PRODUCTS):
+        rows.append([InlineKeyboardButton(product, callback_data=f"adminpanel:plan_product:{i}")])
+    rows.append([InlineKeyboardButton("⬅️ بازگشت به پنل", callback_data="adminpanel:refresh")])
+    return InlineKeyboardMarkup(rows)
+
+
+def admin_plan_tiers_markup(product_index):
+    products = list(PRODUCTS.items())
+    if not 0 <= product_index < len(products):
+        return admin_plan_products_markup()
+    product, tiers = products[product_index]
+    rows = []
+    for i, (label, price) in enumerate(tiers):
+        rows.append([InlineKeyboardButton(f"✏️ نام: {label}", callback_data=f"adminpanel:plan_label:{product_index}:{i}"),
+                     InlineKeyboardButton(f"💰 {money(price)} تومان", callback_data=f"adminpanel:plan_price:{product_index}:{i}")])
+        rows.append([InlineKeyboardButton(f"🗑 حذف پلن «{label}»", callback_data=f"adminpanel:plan_delete:{product_index}:{i}")])
+    rows.append([InlineKeyboardButton("➕ افزودن پلن به این سرویس", callback_data=f"adminpanel:plan_add:{product_index}")])
+    rows.append([InlineKeyboardButton("⬅️ فهرست سرویس‌ها", callback_data="adminpanel:plans")])
+    return InlineKeyboardMarkup(rows)
+
+
 async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query or not is_admin(query.from_user.id):
@@ -2567,6 +2702,99 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     await query.answer()
     action = query.data.split(":", 1)[1]
+
+    if action == "plans":
+        await query.edit_message_text("🧩 مدیریت پلن‌ها\n\nسرویسی را انتخاب کن تا پلن‌هایش را اضافه، ویرایش یا حذف کنی:", reply_markup=admin_plan_products_markup())
+        return
+    if action.startswith("plan_product:"):
+        try:
+            product_index = int(action.split(":")[1])
+            product = list(PRODUCTS)[product_index]
+        except (ValueError, IndexError):
+            await query.edit_message_text("سرویس انتخاب‌شده معتبر نیست.", reply_markup=admin_plan_products_markup()); return
+        await query.edit_message_text(f"🧩 پلن‌های سرویس\n{product}\n\nبرای تغییر نام یا مبلغ، دکمه مربوطه را بزن. برای پلن تازه، افزودن پلن را انتخاب کن.", reply_markup=admin_plan_tiers_markup(product_index))
+        return
+    if action.startswith("plan_add:"):
+        try: product_index = int(action.split(":")[1]); product = list(PRODUCTS)[product_index]
+        except (ValueError, IndexError):
+            await query.edit_message_text("سرویس معتبر نیست.", reply_markup=admin_plan_products_markup()); return
+        context.user_data["admin_plan_flow"] = {"stage": "add_label", "product": product}
+        await query.edit_message_text(f"➕ افزودن پلن برای {product}\n\nنام پلن را بفرست؛ مثلاً «۱۰ گیگابایت» یا «۶ ماه». برای لغو بنویس: لغو")
+        return
+    if action.startswith("plan_label:") or action.startswith("plan_price:"):
+        try:
+            _, pi, ti = action.split(":")
+            pi, ti = int(pi), int(ti)
+            product = list(PRODUCTS)[pi]
+            label, price = PRODUCTS[product][ti]
+        except (ValueError, IndexError, KeyError):
+            await query.edit_message_text("پلن معتبر نیست.", reply_markup=admin_plan_products_markup()); return
+        if action.startswith("plan_label:"):
+            context.user_data["admin_plan_flow"] = {"stage": "edit_label", "product": product, "tier_index": ti, "product_index": pi}
+            prompt = f"✏️ نام جدید پلن را بفرست.\nفعلی: {label}\nبرای لغو بنویس: لغو"
+        else:
+            context.user_data["admin_plan_flow"] = {"stage": "edit_price", "product": product, "tier_index": ti, "product_index": pi}
+            prompt = f"💰 مبلغ جدید پلن را به تومان فقط با عدد بفرست.\n{product} — {label}\nمبلغ فعلی: {money(price)} تومان\nبرای لغو بنویس: لغو"
+        await query.edit_message_text(prompt)
+        return
+    if action.startswith("plan_delete:"):
+        try:
+            _, pi, ti = action.split(":"); pi, ti = int(pi), int(ti)
+            product = list(PRODUCTS)[pi]
+            if len(PRODUCTS[product]) <= 1:
+                await query.answer("هر سرویس باید حداقل یک پلن داشته باشد.", show_alert=True); return
+            removed = PRODUCTS[product].pop(ti)
+            save_price_overrides()
+            await query.edit_message_text(f"🗑 پلن «{removed[0]}» حذف شد.", reply_markup=admin_plan_tiers_markup(pi))
+        except (ValueError, IndexError, KeyError):
+            await query.edit_message_text("پلن معتبر نیست.", reply_markup=admin_plan_products_markup())
+        return
+    if action == "broadcast_menu":
+        context.user_data["admin_broadcast_waiting"] = True
+        context.user_data.pop("admin_sendone_target", None)
+        await query.edit_message_text("📣 پیام همگانی\n\nمتن پیامی را که باید برای اعضای ثبت‌شده ربات ارسال شود بفرست. برای لغو بنویس: لغو")
+        return
+    if action == "sendone_menu":
+        context.user_data["admin_sendone_stage"] = "user_id"
+        context.user_data.pop("admin_sendone_target", None)
+        await query.edit_message_text("✉️ ارسال پیام به یک مشتری\n\nابتدا آیدی عددی مشتری را بفرست. برای لغو بنویس: لغو")
+        return
+    if action == "broadcast_send":
+        draft = context.user_data.pop("admin_broadcast_draft", None)
+        if not draft:
+            await query.edit_message_text("پیش‌نویس پیام پیدا نشد.", reply_markup=admin_panel_markup()); return
+        user_ids = sorted(load_users()); success = failed = 0
+        blocked = set(load_access_data().get("blocked_users", []))
+        for user_id in user_ids:
+            if user_id in blocked: continue
+            try:
+                await context.bot.send_message(chat_id=user_id, text=draft)
+                success += 1
+            except Exception:
+                failed += 1
+                logger.warning("Panel broadcast failed for %s", user_id)
+            await asyncio.sleep(0.04)
+        await query.edit_message_text(f"📣 ارسال همگانی تمام شد.\n👥 اعضای ثبت‌شده: {len(user_ids)}\n✅ موفق: {success}\n❌ ناموفق: {failed}", reply_markup=admin_panel_markup())
+        return
+    if action == "broadcast_cancel":
+        context.user_data.pop("admin_broadcast_draft", None); context.user_data.pop("admin_broadcast_waiting", None)
+        await query.edit_message_text("ارسال همگانی لغو شد.", reply_markup=admin_panel_markup()); return
+    if action == "sendone_send":
+        target = context.user_data.pop("admin_sendone_target", None)
+        draft = context.user_data.pop("admin_sendone_draft", None)
+        if not target or not draft:
+            await query.edit_message_text("اطلاعات پیام کامل نیست.", reply_markup=admin_panel_markup()); return
+        try:
+            await context.bot.send_message(chat_id=int(target), text=draft)
+            result = f"✅ پیام برای مشتری {target} ارسال شد."
+        except Exception as exc:
+            logger.warning("Panel direct message failed target=%s: %s", target, exc)
+            result = "❌ پیام ارسال نشد؛ آیدی را بررسی کن و مطمئن شو مشتری قبلاً ربات را Start کرده است."
+        await query.edit_message_text(result, reply_markup=admin_panel_markup()); return
+    if action == "sendone_cancel":
+        for k in ("admin_sendone_stage", "admin_sendone_target", "admin_sendone_draft"):
+            context.user_data.pop(k, None)
+        await query.edit_message_text("ارسال پیام لغو شد.", reply_markup=admin_panel_markup()); return
 
     if action == "noop":
         return
@@ -3028,7 +3256,7 @@ def main():
     app.add_handler(CommandHandler("removeadmin", removeadmin_command))
     app.add_handler(CommandHandler("admins", admins_command))
     app.add_handler(CommandHandler("admin", admin_panel_command))
-    app.add_handler(CallbackQueryHandler(admin_panel_callback, pattern=r"^adminpanel:(orders|prices|update|online|sections|admins|broadcast|addadmin|refresh|close|servers|price_menu|discount_menu|discount_cancel|close_all|open_all|noop|toggle:(gaming|v2ray|unlimited)|price_cancel|price:\d+:\d+)$"))
+    app.add_handler(CallbackQueryHandler(admin_panel_callback, pattern=r"^adminpanel:(orders|prices|update|online|sections|admins|broadcast|addadmin|refresh|close|servers|price_menu|discount_menu|discount_cancel|close_all|open_all|noop|toggle:(gaming|v2ray|unlimited)|price_cancel|price:\d+:\d+|plans|plan_product:\d+|plan_add:\d+|plan_label:\d+:\d+|plan_price:\d+:\d+|plan_delete:\d+:\d+|broadcast_menu|broadcast_send|broadcast_cancel|sendone_menu|sendone_send|sendone_cancel)$"))
     app.add_handler(CommandHandler("setdiscount", setdiscount_command))
     app.add_handler(CommandHandler("discount_user", discount_user_command))
     app.add_handler(CommandHandler("discount", discount_command))
