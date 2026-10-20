@@ -8,6 +8,9 @@ Set BOT_TOKEN below on your own device. Never share it publicly.
 import json
 import logging
 import os
+import re
+import secrets
+import string
 import asyncio
 import urllib.request
 import urllib.error
@@ -1015,15 +1018,46 @@ async def handle_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     context.user_data["service_name_waiting"] = True
     await update.message.reply_text(
-        "━━━━━━━━━━━━━━━━━━\n"
-        "          🏷 نام‌گذاری سرویس\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        "برای سرویس خود یک نام کوتاه انتخاب کنید و بفرستید.\n\n"
-        "مثال: سرور گیمینگ ۵۰ یا اینترنت گوشی\n"
-        "این نام در بخش «سرویس‌های من» ذخیره می‌شود و برای تمدیدهای بعدی قابل استفاده است.",
-        reply_markup=ReplyKeyboardMarkup([["❌ لغو خرید"]], resize_keyboard=True),
+        "🏷 لطفا یک نام کاربری انتخاب نمایید\n"
+        "حداکثر 10 کارکتر⚠️\n\n"
+        "نام باید فقط با حروف انگلیسی و در صورت تمایل عدد باشد.\n"
+        "می‌توانید خودتان نام را بنویسید یا از دکمه ساخت خودکار استفاده کنید.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎲 ساخت نام خودکار", callback_data="service_name:auto")],
+            [InlineKeyboardButton("❌ لغو خرید", callback_data="cancel_order")],
+        ]),
     )
     return True
+
+
+async def service_name_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.data != "service_name:auto":
+        return
+    pending = context.user_data.get("pending_order")
+    if not pending or not context.user_data.get("service_name_waiting"):
+        await query.message.reply_text("سفارش فعالی برای نام‌گذاری پیدا نشد؛ لطفاً خرید را دوباره شروع کنید.")
+        return
+    # Short, foreign-looking ASCII service names; customer can still type their own.
+    alphabet = string.ascii_letters + string.digits
+    name = "".join(secrets.choice(alphabet) for _ in range(8))
+    pending["service_name"] = name
+    context.user_data["service_name_waiting"] = False
+    percent = pending.get("discount_percent", 0)
+    discount_line = (f"💵 مبلغ قبل از تخفیف: {money(pending['original_amount'])}\n🏷 تخفیف: {percent}٪\n" if percent else "")
+    await query.message.reply_text(
+        "━━━━━━━━━━━━━━━━━━\n          🧾 خلاصه سفارش\n━━━━━━━━━━━━━━━━━━\n\n"
+        f"🌐 سرویس: {pending['panel']}\n📦 محصول: {pending['product']}\n"
+        f"🏷 نام سرویس: {name}\n📊 حجم / تعداد: {pending['quantity']}\n"
+        f"{discount_line}━━━━━━━━━━━━━━━━━━\n💳 مبلغ نهایی: {money(pending['amount'])} تومان\n━━━━━━━━━━━━━━━━━━\n\n"
+        "روش پرداخت را از دکمه‌های زیر انتخاب کنید.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("💳 پرداخت با اعتبار من", callback_data="wallet:pay")],
+            [InlineKeyboardButton("✅ پرداخت با رسید بانکی", callback_data="confirm_order")],
+            [InlineKeyboardButton("❌ لغو خرید", callback_data="cancel_order")],
+        ]),
+    )
 
 
 async def wallet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1158,20 +1192,16 @@ async def order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["active_receipt_order"] = order_id
     context.user_data.pop("pending_order", None)
     await query.message.reply_text(
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"          💳 پرداخت سفارش\n"
-        f"━━━━━━━━━━━━━━━━━━\n\n"
-        f"مبلغ قابل پرداخت: {int(order['amount']):,} تومان ({int(order['amount']) * 10:,} ریال)\n\n"
-        "لطفاً مبلغ را به کارت زیر واریز کنید. 👇🏻\n\n"
-        "┌────────────────────┐\n"
-        "  💳 5022291620713105\n"
-        "  👤 محمد امین یوسفی\n"
-        "└────────────────────┘\n\n"
-        "📸 تصویر رسید را در همین گفتگو ارسال کنید.\n"
-        f"🧾 شماره سفارش: #{order_number}\n\n"
-        "⚠️ پیش از پرداخت، مبلغ و شماره کارت را بررسی کنید.\n"
-        "⚠️ مسئولیت واریز اشتباهی بر عهده پرداخت‌کننده است.\n"
-        "در صورت انصراف، دکمه لغو خرید را بزنید.",
+        f"لطفا مبلغ {int(order['amount']):,} تومان ({int(order['amount']) * 10:,} ریال) به کارت زیر واریز نمایید. 👇🏻\n\n"
+        "====================\n"
+        "5022291620713105\n"
+        "محمد امین یوسفی\n"
+        "====================\n\n"
+        "🌅 عکس رسید خود را در این مرحله ارسال نمایید.\n\n"
+        "⚠️ امکان برداشت وجه از کیف پول نیست.\n"
+        "⚠️ مسئولیت واریز اشتباهی با شماست.\n\n"
+        f"🧾 شماره سفارش: #{order_number}\n"
+        "برای انصراف، دکمه لغو خرید را بزنید.",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("❌ لغو خرید", callback_data=f"cancel_active_order:{order_id}")],
             [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="global_back")],
@@ -2177,17 +2207,14 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("wallet_topup_waiting", None)
         context.user_data["wallet_topup_receipt_waiting"] = True
         await update.message.reply_text(
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"          💳 شارژ کیف پول\n"
-            f"━━━━━━━━━━━━━━━━━━\n\n"
-            f"لطفاً مبلغ {amount:,} تومان ({amount * 10:,} ریال) را به کارت زیر واریز کنید. 👇🏻\n\n"
-            "┌────────────────────┐\n"
-            "  💳 5022291620713105\n"
-            "  👤 محمد امین یوسفی\n"
-            "└────────────────────┘\n\n"
-            "📸 پس از پرداخت، تصویر رسید را همین‌جا ارسال کنید.\n\n"
-            "⚠️ امکان برداشت وجه از کیف پول وجود ندارد.\n"
-            "⚠️ مسئولیت واریز اشتباهی بر عهده پرداخت‌کننده است.\n\n"
+            f"لطفا مبلغ {amount:,} تومان ({amount * 10:,} ریال) به کارت زیر واریز نمایید. 👇🏻\n\n"
+            "====================\n"
+            "5022291620713105\n"
+            "محمد امین یوسفی\n"
+            "====================\n\n"
+            "🌅 عکس رسید خود را در این مرحله ارسال نمایید.\n\n"
+            "⚠️ امکان برداشت وجه از کیف پول نیست.\n"
+            "⚠️ مسئولیت واریز اشتباهی با شماست.\n\n"
             "پس از بررسی مدیریت، در صورت تأیید، مبلغ به کیف پول شما افزوده می‌شود.\n"
             "برای انصراف، «لغو» را ارسال کنید.",
             reply_markup=ReplyKeyboardMarkup([["❌ لغو"]], resize_keyboard=True),
@@ -2216,8 +2243,11 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop("pending_order", None)
             await update.message.reply_text("خرید لغو شد.", reply_markup=MAIN_MARKUP)
             return
-        if not txt or len(txt) > 50:
-            await update.message.reply_text("نام سرویس باید بین ۱ تا ۵۰ نویسه باشد. دوباره بفرستید.")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,10}", txt):
+            await update.message.reply_text(
+                "⚠️ نام باید حداکثر ۱۰ کاراکتر و فقط شامل حروف انگلیسی، عدد، _ یا - باشد.\n"
+                "مثال: AminX50 یا Speed_01"
+            )
             return
         pending = context.user_data.get("pending_order")
         if not pending:
@@ -3457,6 +3487,7 @@ def main():
     app.add_handler(CommandHandler("orders", admin_orders))
     app.add_handler(CommandHandler("sendconfig", sendconfig_command))
     app.add_handler(CommandHandler("wallet_add", wallet_admin_command))
+    app.add_handler(CallbackQueryHandler(service_name_callback, pattern=r"^service_name:auto$"))
     app.add_handler(CallbackQueryHandler(wallet_callback, pattern=r"^wallet:"))
     app.add_handler(CommandHandler("test_add", test_add_command))
     app.add_handler(CommandHandler("test_list", test_list_command))
