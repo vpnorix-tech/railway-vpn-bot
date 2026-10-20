@@ -1020,7 +1020,7 @@ async def handle_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🏷 لطفا یک نام کاربری انتخاب نمایید\n"
         "حداکثر 10 کارکتر⚠️\n\n"
-        "نام باید فقط با حروف انگلیسی و در صورت تمایل عدد باشد.\n"
+        "نام فقط با حروف انگلیسی، عدد، _ یا - باشد.\n"
         "می‌توانید خودتان نام را بنویسید یا از دکمه ساخت خودکار استفاده کنید.",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🎲 ساخت نام خودکار", callback_data="service_name:auto")],
@@ -1079,20 +1079,37 @@ async def wallet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("❌ برای این درخواست رسید پرداخت ثبت نشده؛ شارژ انجام نشد.")
             return
         if decision == "approve":
-            wallet["balances"][uid] = wallet_balance(wallet, uid) + amount
+            # Mark and persist the approval together with the credit transaction to prevent
+            # a second tap on the same admin button from crediting the wallet twice.
+            wallet.setdefault("balances", {})[uid] = wallet_balance(wallet, uid) + amount
             request["status"] = "approved"
+            request["reviewed_by"] = user.id
+            request["reviewed_at"] = datetime.now().isoformat(timespec="seconds")
             wallet.setdefault("transactions", []).append({"user_id": int(uid), "type": "topup", "amount": amount, "request_id": request_id, "by": user.id, "at": datetime.now().isoformat(timespec="seconds")})
             save_wallet(wallet)
-            await context.bot.send_message(
-                chat_id=int(uid),
-                text=f"🎉 مبلغ {amount:,} تومان به موجودی کیف پول شما اضافه شد.\n\n"
-                     f"💳 موجودی فعلی کیف پول: {money(wallet_balance(wallet, uid))}"
-            )
-            await query.message.reply_text(f"✅ شارژ درخواست #{request_id} تأیید شد.")
+            try:
+                await context.bot.send_message(
+                    chat_id=int(uid),
+                    text=f"🎉 مبلغ {amount:,} تومان به موجودی کیف پول شما اضافه شد.\n\n"
+                         f"💳 موجودی فعلی کیف پول: {money(wallet_balance(wallet, uid))}"
+                )
+                await query.message.reply_text(f"✅ شارژ درخواست #{request_id} تأیید شد و پیام برای مشتری ارسال شد.")
+            except TelegramError:
+                logger.exception("Wallet top-up %s approved but customer notification failed", request_id)
+                await query.message.reply_text(f"✅ شارژ درخواست #{request_id} ثبت شد؛ اما پیام به مشتری ارسال نشد.")
         elif decision == "reject":
-            request["status"] = "rejected"; request["reviewed_by"] = user.id; save_wallet(wallet)
-            await context.bot.send_message(chat_id=int(uid), text=f"❌ درخواست شارژ {money(amount)} رد شد. برای پیگیری با پشتیبانی تماس بگیرید.")
+            request["status"] = "rejected"
+            request["reviewed_by"] = user.id
+            request["reviewed_at"] = datetime.now().isoformat(timespec="seconds")
+            save_wallet(wallet)
+            try:
+                await context.bot.send_message(chat_id=int(uid), text=f"❌ درخواست شارژ {money(amount)} رد شد. برای پیگیری با پشتیبانی تماس بگیرید.")
+            except TelegramError:
+                logger.exception("Wallet top-up rejection notification failed for request %s", request_id)
             await query.message.reply_text(f"درخواست شارژ #{request_id} رد شد.")
+        else:
+            await query.message.reply_text("عملیات بررسی نامعتبر است.")
+            return
         try: await query.edit_message_reply_markup(reply_markup=None)
         except TelegramError: pass
         return
@@ -1240,25 +1257,32 @@ async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     admin_keyboard = admin_order_actions(order_id)
     caption = "📥 سفارش جدید — رسید کارت‌به‌کارت پیوست است\n\n" + order_text(order) + "\n\nاگر رسید معتبر است «ارسال سرور» را بزنید؛ در غیر این صورت «رد خرید»."
-    try:
-        for admin_id in sorted(load_admin_ids()):
+    sent_to_admin = 0
+    for admin_id in sorted(load_admin_ids()):
+        try:
             await context.bot.send_photo(
                 chat_id=admin_id,
                 photo=file_id,
                 caption=caption,
                 reply_markup=admin_keyboard,
             )
+            sent_to_admin += 1
+        except TelegramError:
+            logger.exception("Failed to send receipt for order %s to admin %s", order_id, admin_id)
+    if sent_to_admin:
         await update.message.reply_text(
-            "✅ رسید پرداخت شما با موفقیت دریافت و جهت بررسی به واحد مدیریت ارسال شد.\n\n"
+            "✅ رسید پرداخت شما دریافت و برای مدیریت ارسال شد.\n\n"
             "پس از بررسی، نتیجه از طریق همین ربات به اطلاع شما خواهد رسید.\n"
             "از شکیبایی شما سپاسگزاریم.",
             reply_markup=MAIN_MARKUP,
         )
         context.user_data.pop("active_receipt_order", None)
-    except Exception:
-        logger.exception("Failed to notify admin")
+    else:
+        # Keep the active order so the customer can retry sending the receipt after
+        # admin chat IDs/permissions are corrected; do not claim it was delivered.
         await update.message.reply_text(
-            "رسید دریافت شد، اما ارسال آن به ادمین انجام نشد. لطفاً کمی بعد دوباره تلاش کنید."
+            "⚠️ رسید ثبت شد، اما ارسال آن برای مدیریت ناموفق بود. فعلاً رسید را دوباره نفرستید؛ "
+            "با پشتیبانی تماس بگیرید تا دسترسی ربات به ادمین بررسی شود."
         )
 
 
@@ -1645,34 +1669,6 @@ async def my_service_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         [InlineKeyboardButton("📋 دریافت دوباره اطلاعات سرویس", callback_data=f"service_info:{order_id}")],
         [InlineKeyboardButton("🔙 سرویس‌های من", callback_data="myservices_page:0")],
     ]))
-
-
-async def service_info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    try:
-        order_id = str(int(query.data.split(":", 1)[1]))
-    except (ValueError, IndexError):
-        await query.message.reply_text("شناسه سرویس معتبر نیست.")
-        return
-    order = load_db().get("orders", {}).get(order_id)
-    if not order or order.get("user_id") != query.from_user.id or not order.get("config_sent"):
-        await query.message.reply_text("این سرویس پیدا نشد یا متعلق به شما نیست.")
-        return
-    name = order.get("service_name") or order.get("panel") or "سرویس"
-    link = order.get("server_link") or ""
-    config_text = order.get("config_text") or ""
-    await query.message.reply_text(
-        f"📱 اطلاعات ذخیره‌شده سرویس\n🏷 نام: {name}\n🧾 سفارش: #{order.get('order_number', order_id)}\n"
-        f"📦 نوع: {order.get('panel', '—')}\n🔹 محصول: {order.get('product', '—')}\n"
-        f"🔗 لینک: {'ذخیره شده' if link else 'متن کانفیگ ذخیره شده' if config_text else 'ثبت نشده'}\n📷 QR: {'ذخیره شده' if order.get('server_qr_file_id') else 'ثبت نشده'}"
-    )
-    if link:
-        await context.bot.send_message(chat_id=query.from_user.id, text=f"🔗 لینک سرویس «{name}»:\n{link}", disable_web_page_preview=True)
-    elif config_text:
-        await context.bot.send_message(chat_id=query.from_user.id, text=f"🔗 متن کانفیگ سرویس «{name}»:\n{config_text}")
-    if order.get("server_qr_file_id"):
-        await context.bot.send_photo(chat_id=query.from_user.id, photo=order["server_qr_file_id"], caption=f"📷 QR سرویس «{name}»")
 
 
 async def service_info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2561,7 +2557,7 @@ async def market_photo_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         sent = 0
         caption = (f"💰 درخواست شارژ اعتبار #{request_id}\n"
                    f"👤 مشتری: {user.full_name}\n🆔 آیدی: {user.id}\n"
-                   f"💵 مبلغ درخواستی: {money(amount)} تومان\n\n"
+                   f"💵 مبلغ درخواستی: {money(amount)}\n\n"
                    "📸 رسید پرداخت مشتری؛ لطفاً تصویر و مبلغ را بررسی کنید.")
         for admin_id in load_admin_ids():
             try:
@@ -3501,8 +3497,6 @@ def main():
     app.add_handler(CallbackQueryHandler(order_callback, pattern=r"^(confirm_order|cancel_order)$"))
     app.add_handler(CallbackQueryHandler(my_service_callback, pattern=r"^myservice:\d+$"))
     app.add_handler(CallbackQueryHandler(service_info_callback, pattern=r"^service_info:\d+$"))
-    app.add_handler(CallbackQueryHandler(service_info_callback, pattern=r"^service_info:\d+$"))
-    app.add_handler(CallbackQueryHandler(my_service_callback, pattern=r"^service_info:\d+$"))
     app.add_handler(CallbackQueryHandler(my_services_page_callback, pattern=r"^myservices_page:\d+$"))
     app.add_handler(CallbackQueryHandler(renew_service_callback, pattern=r"^renew_service:\d+$"))
     app.add_handler(CallbackQueryHandler(order_action_callback, pattern=r"^order_action:(send|reject):\d+$"))
