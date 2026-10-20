@@ -143,20 +143,19 @@ def save_price_overrides():
 
 load_price_overrides()
 
+# Customer-facing menu only. Admin panel and its handlers are intentionally unchanged.
 MAIN_MENU = [
-    ["🚀 خرید سرویس جدید", "🧪 اکانت تست"],
-    ["💰 تعرفه سرویس‌ها"],
-    ["📱 سرویس‌های من", "♻️ تمدید سرویس"],
-    ["💡 آموزش استفاده", "💰 اعتبار من"],
-    ["🎗️ کاربران برتر", "👥 معرفی به دوستان"],
+    ["🚀 خرید سرویس جدید", "📱 سرویس‌های من"],
+    ["♻️ تمدید سرویس", "💰 اعتبار من"],
+    ["💰 تعرفه سرویس‌ها", "🧪 اکانت تست"],
+    ["💡 آموزش استفاده", "👥 معرفی به دوستان"],
+    ["🎗️ کاربران برتر", "🤝 درخواست نمایندگی"],
+    ["🎮 شاپ اکانت بازی‌ها", "💎 خدمات مجازی"],
     ["🧑🏻‍💻 تماس با پشتیبانی"],
-    ["🤝 درخواست نمایندگی"],
-    ["🎮 شاپ اکانت بازی‌ها"],
-    ["💎 خدمات مجازی"],
     ["🔙 بازگشت به انتخاب سرور", "🔙 منوی اصلی"],
 ]
 MAIN_MARKUP = ReplyKeyboardMarkup(
-    MAIN_MENU, resize_keyboard=True, one_time_keyboard=True, is_persistent=False
+    MAIN_MENU, resize_keyboard=True, one_time_keyboard=False, is_persistent=True
 )
 
 
@@ -768,31 +767,39 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     context.user_data.clear()
     await update.message.reply_text(
-        "سلام، خوش آمدید 🌟\nاز منوی زیر گزینه موردنظرتان را انتخاب کنید.",
+        "━━━━━━━━━━━━━━━━━━\n"
+        "          SPEEDCONFIG\n"
+        "   سرویس مطمئن، خرید آسان\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "سلام و خوش آمدید 👋\n"
+        "به پنل خدمات SpeedConfig خوش آمدید.\n\n"
+        "از منوی پایین، بخش موردنظر خود را انتخاب کنید.\n"
+        "برای پیگیری سفارش‌ها و مدیریت سرویس‌ها، از بخش «سرویس‌های من» استفاده کنید.",
         reply_markup=MAIN_MARKUP,
     )
 
 
 async def show_tariffs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     percent = load_user_discount_percent(update.effective_user.id)
-    lines = ["💰 تعرفه سرویس‌ها\n"]
+    lines = ["━━━━━━━━━━━━━━━━━━", "        💠 تعرفه سرویس‌ها", "━━━━━━━━━━━━━━━━━━"]
     if percent:
-        lines.append(f"🏷 تخفیف فعال: {percent}٪\n")
+        lines.append(f"🏷 تخفیف اختصاصی فعال: {percent}٪")
     for panel, options in PRODUCTS.items():
-        lines.append(f"\n{panel}")
+        lines.append(f"\n▎{panel}")
         for product, price in options:
             final_price = discounted_price(price, percent)
             if percent:
-                lines.append(f"• {product}: قیمت عادی {money(price)} | با تخفیف {money(final_price)}")
+                lines.append(f"  • {product}\n    قیمت اصلی: {money(price)} | با تخفیف: {money(final_price)}")
             else:
-                lines.append(f"• {product}: {money(price)}")
+                lines.append(f"  • {product}: {money(price)}")
+    lines.append("\n━━━━━━━━━━━━━━━━━━\nبرای ثبت سفارش، «خرید سرویس جدید» را انتخاب کنید.")
     await update.message.reply_text("\n".join(lines), reply_markup=MAIN_MARKUP)
 
 
 def server_selection_markup():
-    keyboard = [[InlineKeyboardButton(name, callback_data=f"panel:{i}")]
+    keyboard = [[InlineKeyboardButton(f"🌐  {name}", callback_data=f"panel:{i}")]
                 for i, name in enumerate(PRODUCTS)]
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back")])
+    keyboard.append([InlineKeyboardButton("↩️ بازگشت به منوی اصلی", callback_data="back")])
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -800,7 +807,11 @@ async def begin_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id) and await section_gate(update.effective_message, "purchase"):
         return
     await update.effective_message.reply_text(
-        "🌍 لطفاً سرور موردنظر را انتخاب کنید:",
+        "━━━━━━━━━━━━━━━━━━\n"
+        "          🛒 خرید سرویس\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "لطفاً سرویس موردنظر خود را انتخاب کنید.\n"
+        "پس از انتخاب سرویس، حجم یا مدت، نام دلخواه و روش پرداخت را مشخص می‌کنید.",
         reply_markup=server_selection_markup(),
     )
 
@@ -1004,9 +1015,12 @@ async def handle_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     context.user_data["service_name_waiting"] = True
     await update.message.reply_text(
-        "🏷 برای سرویس خود یک نام انتخاب کنید و بفرستید.\n\n"
-        "مثال: سرور گیمینگ شماره ۵۰ یا سرور گوشی\n"
-        "این نام در بخش «سرویس‌های من» نمایش داده می‌شود.",
+        "━━━━━━━━━━━━━━━━━━\n"
+        "          🏷 نام‌گذاری سرویس\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "برای سرویس خود یک نام کوتاه انتخاب کنید و بفرستید.\n\n"
+        "مثال: سرور گیمینگ ۵۰ یا اینترنت گوشی\n"
+        "این نام در بخش «سرویس‌های من» ذخیره می‌شود و برای تمدیدهای بعدی قابل استفاده است.",
         reply_markup=ReplyKeyboardMarkup([["❌ لغو خرید"]], resize_keyboard=True),
     )
     return True
@@ -1035,7 +1049,11 @@ async def wallet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             request["status"] = "approved"
             wallet.setdefault("transactions", []).append({"user_id": int(uid), "type": "topup", "amount": amount, "request_id": request_id, "by": user.id, "at": datetime.now().isoformat(timespec="seconds")})
             save_wallet(wallet)
-            await context.bot.send_message(chat_id=int(uid), text=f"✅ درخواست شارژ تأیید شد.\n💰 مبلغ: {money(amount)}\n💳 اعتبار فعلی: {money(wallet_balance(wallet, uid))}")
+            await context.bot.send_message(
+                chat_id=int(uid),
+                text=f"🎉 مبلغ {amount:,} تومان به موجودی کیف پول شما اضافه شد.\n\n"
+                     f"💳 موجودی فعلی کیف پول: {money(wallet_balance(wallet, uid))}"
+            )
             await query.message.reply_text(f"✅ شارژ درخواست #{request_id} تأیید شد.")
         elif decision == "reject":
             request["status"] = "rejected"; request["reviewed_by"] = user.id; save_wallet(wallet)
@@ -1046,7 +1064,16 @@ async def wallet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if data == "wallet:topup":
         await query.answer(); context.user_data["wallet_topup_waiting"] = True
-        await query.message.reply_text("💳 مبلغ شارژ را به تومان وارد کنید.\nمثال: 100000\nحداقل شارژ ۱۰٬۰۰۰ تومان است. برای لغو بنویسید: لغو")
+        await query.message.reply_text(
+            "━━━━━━━━━━━━━━━━━━\n"
+            "          💳 شارژ کیف پول\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+            "مبلغ موردنظر برای شارژ را به تومان وارد کنید.\n"
+            "مثال: 100000\n\n"
+            "حداقل شارژ: ۱۰٬۰۰۰ تومان\n"
+            "برای انصراف، «لغو» را ارسال کنید.",
+            reply_markup=ReplyKeyboardMarkup([["❌ لغو"]], resize_keyboard=True, one_time_keyboard=False),
+        )
         return
     if data == "wallet:pay":
         await query.answer(); pending = context.user_data.get("pending_order")
@@ -1131,10 +1158,20 @@ async def order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["active_receipt_order"] = order_id
     context.user_data.pop("pending_order", None)
     await query.message.reply_text(
-        f"✅ شماره سفارش: #{order_number}\n"
-        f"🔐 شناسه داخلی سفارش: #{order_id}\n"
-        "حالا لطفاً عکس رسید پرداخت را ارسال کنید.\n\n"
-        "اگر منصرف شدید، می‌توانید خرید را لغو کنید.",
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"          💳 پرداخت سفارش\n"
+        f"━━━━━━━━━━━━━━━━━━\n\n"
+        f"مبلغ قابل پرداخت: {int(order['amount']):,} تومان ({int(order['amount']) * 10:,} ریال)\n\n"
+        "لطفاً مبلغ را به کارت زیر واریز کنید. 👇🏻\n\n"
+        "┌────────────────────┐\n"
+        "  💳 5022291620713105\n"
+        "  👤 محمد امین یوسفی\n"
+        "└────────────────────┘\n\n"
+        "📸 تصویر رسید را در همین گفتگو ارسال کنید.\n"
+        f"🧾 شماره سفارش: #{order_number}\n\n"
+        "⚠️ پیش از پرداخت، مبلغ و شماره کارت را بررسی کنید.\n"
+        "⚠️ مسئولیت واریز اشتباهی بر عهده پرداخت‌کننده است.\n"
+        "در صورت انصراف، دکمه لغو خرید را بزنید.",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("❌ لغو خرید", callback_data=f"cancel_active_order:{order_id}")],
             [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="global_back")],
@@ -2140,13 +2177,19 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("wallet_topup_waiting", None)
         context.user_data["wallet_topup_receipt_waiting"] = True
         await update.message.reply_text(
-            f"💰 شارژ کیف پول SpeedCon\n\n"
-            f"💵 مبلغ قابل واریز: {money(amount)} تومان\n"
-            "👤 نام صاحب کارت: محمد امین یوسفی\n"
-            "💳 شماره کارت: 5022291620713105\n\n"
-            "لطفاً مبلغ بالا را به کارت اعلام‌شده واریز کنید و سپس عکس رسید را همین‌جا ارسال کنید.\n"
-            "پس از ارسال رسید، درخواست برای ادمین می‌رود. فقط پس از تأیید ادمین، مبلغ به کیف پول شما اضافه می‌شود.\n\n"
-            "برای لغو بنویسید: لغو",
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"          💳 شارژ کیف پول\n"
+            f"━━━━━━━━━━━━━━━━━━\n\n"
+            f"لطفاً مبلغ {amount:,} تومان ({amount * 10:,} ریال) را به کارت زیر واریز کنید. 👇🏻\n\n"
+            "┌────────────────────┐\n"
+            "  💳 5022291620713105\n"
+            "  👤 محمد امین یوسفی\n"
+            "└────────────────────┘\n\n"
+            "📸 پس از پرداخت، تصویر رسید را همین‌جا ارسال کنید.\n\n"
+            "⚠️ امکان برداشت وجه از کیف پول وجود ندارد.\n"
+            "⚠️ مسئولیت واریز اشتباهی بر عهده پرداخت‌کننده است.\n\n"
+            "پس از بررسی مدیریت، در صورت تأیید، مبلغ به کیف پول شما افزوده می‌شود.\n"
+            "برای انصراف، «لغو» را ارسال کنید.",
             reply_markup=ReplyKeyboardMarkup([["❌ لغو"]], resize_keyboard=True),
         )
         return
@@ -2186,10 +2229,17 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         percent = pending.get("discount_percent", 0)
         discount_line = (f"💵 مبلغ قبل از تخفیف: {money(pending['original_amount'])}\n🏷 تخفیف: {percent}٪\n" if percent else "")
         await update.message.reply_text(
-            f"🧾 خلاصه سفارش\n\n🌐 سرویس: {pending['panel']}\n📦 محصول: {pending['product']}\n"
-            f"🏷 نام انتخابی شما: {txt}\n📊 حجم/تعداد: {pending['quantity']}\n"
-            f"{discount_line}💵 مبلغ قابل پرداخت: {money(pending['amount'])}\n\n"
-            "💳 پس از ثبت سفارش، عکس رسید پرداخت را ارسال کنید.",
+            "━━━━━━━━━━━━━━━━━━\n"
+            "          🧾 خلاصه سفارش\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+            f"🌐 سرویس: {pending['panel']}\n"
+            f"📦 محصول: {pending['product']}\n"
+            f"🏷 نام سرویس: {txt}\n"
+            f"📊 حجم / تعداد: {pending['quantity']}\n"
+            f"{discount_line}━━━━━━━━━━━━━━━━━━\n"
+            f"💳 مبلغ نهایی: {money(pending['amount'])} تومان\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+            "روش پرداخت را از دکمه‌های زیر انتخاب کنید.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("💳 پرداخت با اعتبار من", callback_data="wallet:pay")],
                 [InlineKeyboardButton("✅ پرداخت با رسید بانکی", callback_data="confirm_order")],
