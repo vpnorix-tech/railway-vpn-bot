@@ -8,9 +8,6 @@ Set BOT_TOKEN below on your own device. Never share it publicly.
 import json
 import logging
 import os
-import re
-import secrets
-import string
 import asyncio
 import urllib.request
 import urllib.error
@@ -22,7 +19,6 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
     KeyboardButton,
     InputMediaPhoto,
 )
@@ -147,24 +143,23 @@ def save_price_overrides():
 
 load_price_overrides()
 
-# Customer-facing menus only. Admin panel and its handlers are intentionally unchanged.
-# The main menu uses inline buttons inside the chat, so it no longer occupies the bottom keyboard.
-MAIN_MENU_MARKUP = InlineKeyboardMarkup([
-    [InlineKeyboardButton("🚀 خرید سرویس جدید", callback_data="main:buy"), InlineKeyboardButton("📱 سرویس‌های من", callback_data="main:services")],
-    [InlineKeyboardButton("♻️ تمدید سرویس", callback_data="main:renew")],
-    [InlineKeyboardButton("💰 تعرفه سرویس‌ها", callback_data="main:tariffs"), InlineKeyboardButton("🧪 اکانت تست", callback_data="main:test")],
-    [InlineKeyboardButton("💡 آموزش استفاده", callback_data="main:usage"), InlineKeyboardButton("👥 معرفی به دوستان", callback_data="main:referral")],
-    [InlineKeyboardButton("🎗️ کاربران برتر", callback_data="main:topusers"), InlineKeyboardButton("🤝 درخواست نمایندگی", callback_data="main:agency")],
-    [InlineKeyboardButton("🎮 شاپ اکانت بازی‌ها", callback_data="main:market"), InlineKeyboardButton("💎 خدمات مجازی", callback_data="main:virtual")],
-    [InlineKeyboardButton("🧑🏻‍💻 تماس با پشتیبانی", callback_data="main:support")],
-    [InlineKeyboardButton("🔙 بازگشت به انتخاب سرور", callback_data="main:servers"), InlineKeyboardButton("🏠 منوی اصلی", callback_data="main:home")],
-])
-# No customer reply keyboard: the menu is inline, so it does not occupy the bottom half of the screen.
-# ReplyKeyboardRemove on /start clears the oversized keyboard left by older versions.
-# Compact button appended to status/results instead of repeatedly showing the entire menu.
-MAIN_MARKUP = InlineKeyboardMarkup([
-    [InlineKeyboardButton("🏠 نمایش منوی اصلی", callback_data="main:show")]
-])
+MAIN_MENU = [
+    ["🚀 خرید سرویس جدید", "🧪 اکانت تست"],
+    ["💰 تعرفه سرویس‌ها"],
+    ["📱 سرویس‌های من", "♻️ تمدید سرویس"],
+    ["💡 آموزش استفاده", "💰 اعتبار من"],
+    ["🎗️ کاربران برتر", "👥 معرفی به دوستان"],
+    ["🧑🏻‍💻 تماس با پشتیبانی"],
+    ["🤝 درخواست نمایندگی"],
+    ["🎮 شاپ اکانت بازی‌ها"],
+    ["💎 خدمات مجازی"],
+    ["🔙 بازگشت به انتخاب سرور", "🔙 منوی اصلی"],
+]
+MAIN_MARKUP = ReplyKeyboardMarkup(
+    MAIN_MENU, resize_keyboard=True, one_time_keyboard=True, is_persistent=False
+)
+
+
 
 
 def load_admin_ids():
@@ -763,7 +758,7 @@ async def global_back_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data.pop("panel", None)
     context.user_data.pop("product", None)
     context.user_data.pop("unit_price", None)
-    await query.message.reply_text("به منوی اصلی برگشتید.", reply_markup=MAIN_MENU_MARKUP)
+    await query.message.reply_text("به منوی اصلی برگشتید.", reply_markup=MAIN_MARKUP)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -772,142 +767,32 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await access_gate(update, context):
         return
     context.user_data.clear()
-    # Clear the old persistent reply keyboard from previous bot versions.
     await update.message.reply_text(
-        "منوی قدیمی به‌روزرسانی شد؛ از دکمه‌های داخل پیام استفاده کنید.",
-        reply_markup=ReplyKeyboardRemove(),
-    )
-    await update.message.reply_text(
-        "━━━━━━━━━━━━━━━━━━\n"
-        "          SPEEDCONFIG\n"
-        "   سرویس مطمئن، خرید آسان\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        "سلام و خوش آمدید 👋\n"
-        "به پنل خدمات SpeedConfig خوش آمدید.\n\n"
-        "برای استفاده از بخش‌ها، دکمه‌های شیشه‌ای زیر را انتخاب کنید.\n"
-        "منوی پایین حذف شده تا فضای بیشتری برای گفتگو داشته باشید.",
-    )
-    await update.message.reply_text(
-        "🏠 منوی اصلی SpeedConfig\nبخش موردنظر را انتخاب کنید:",
-        reply_markup=MAIN_MENU_MARKUP,
+        "سلام، خوش آمدید 🌟\nاز منوی زیر گزینه موردنظرتان را انتخاب کنید.",
+        reply_markup=MAIN_MARKUP,
     )
 
-
-async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Routes customer-facing inline menu buttons. The separate admin panel is unchanged.
-    query = update.callback_query
-    if not query:
-        return
-    parts = (query.data or "").split(":", 1)
-    action = parts[1] if len(parts) == 2 else ""
-
-    if action == "show":
-        await query.answer()
-        try:
-            await query.edit_message_reply_markup(reply_markup=MAIN_MENU_MARKUP)
-        except TelegramError:
-            await query.message.reply_text("منوی اصلی:", reply_markup=MAIN_MENU_MARKUP)
-        return
-
-    await query.answer()
-    try:
-        await query.edit_message_reply_markup(reply_markup=None)
-    except TelegramError:
-        pass
-
-    user = query.from_user
-    message = query.message
-    if not user or not message:
-        return
-
-    if action in ("buy", "servers"):
-        await begin_purchase(update, context)
-    elif action == "services":
-        await my_orders(update, context)
-    elif action == "renew":
-        if not is_admin(user.id) and await section_gate(message, "renew"):
-            return
-        await my_orders(update, context)
-    elif action == "tariffs":
-        if not is_admin(user.id) and await section_gate(message, "tariffs"):
-            return
-        await show_tariffs(update, context)
-    elif action == "test":
-        if not is_admin(user.id) and await section_gate(message, "test"):
-            return
-        await message.reply_text(
-            "🧪 دریافت اکانت تست\n\nهر کاربر فقط یک‌بار می‌تواند تست دریافت کند. لینک‌ها به ترتیب توسط ادمین اضافه می‌شوند و هر لینک فقط یک‌بار از صف تحویل داده می‌شود.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🎁 دریافت اکانت تست رایگان", callback_data="test:request")],
-                [InlineKeyboardButton("🏠 منوی اصلی", callback_data="main:home")],
-            ]),
-        )
-    elif action == "usage":
-        await message.reply_text("آموزش استفاده فعلاً در حال آماده‌سازی است.", reply_markup=MAIN_MARKUP)
-    elif action == "topusers":
-        await message.reply_text("فهرست کاربران برتر فعلاً در دسترس نیست.", reply_markup=MAIN_MARKUP)
-    elif action == "referral":
-        bot_username = context.bot_data.get("bot_username", "")
-        referral_text = (f"لینک معرفی شما:\nhttps://t.me/{bot_username}?start={user.id}"
-                         if bot_username else "لینک معرفی در دسترس نیست.")
-        await message.reply_text(referral_text, reply_markup=MAIN_MARKUP)
-    elif action == "support":
-        context.user_data["contact_flow"] = "support"
-        await message.reply_text(
-            "🧑🏻‍💻 پیام خود را برای پشتیبانی بنویسید تا برای مدیریت ارسال شود.\n\nبرای لغو، کلمه «لغو» را بفرستید.",
-            reply_markup=MAIN_MARKUP,
-        )
-    elif action == "agency":
-        context.user_data["contact_flow"] = "representative"
-        await message.reply_text(
-            "🤝 درخواست نمایندگی\n\nلطفاً در یک پیام این اطلاعات را بنویسید: نام، شهر/کشور، روش جذب مشتری و سابقه فروش (در صورت وجود).\n\nدرخواست شما برای مدیریت ارسال می‌شود. برای لغو، کلمه «لغو» را بفرستید.",
-            reply_markup=MAIN_MARKUP,
-        )
-    elif action == "market":
-        if not is_admin(user.id) and await section_gate(message, "market"):
-            return
-        await market_open(update, context)
-    elif action == "virtual":
-        if not is_admin(user.id) and await section_gate(message, "virtual"):
-            return
-        await message.reply_text(
-            "💎 خدمات مجازی\n\nپلن موردنظر تلگرام پرمیوم را انتخاب کنید:",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("💎 تلگرام پرمیوم — ۱ ماه | ۱٬۲۰۰٬۰۰۰ تومان", callback_data="virtual:0")],
-                [InlineKeyboardButton("💎 تلگرام پرمیوم — ۳ ماه | ۳٬۹۰۰٬۰۰۰ تومان", callback_data="virtual:1")],
-                [InlineKeyboardButton("💎 تلگرام پرمیوم — ۶ ماه | ۸٬۰۰۰٬۰۰۰ تومان", callback_data="virtual:2")],
-                [InlineKeyboardButton("🏠 منوی اصلی", callback_data="main:home")],
-            ]),
-        )
-    elif action == "home":
-        await cancel_active_order(user.id, context)
-        for key in ("quantity_waiting", "pending_order", "service_name_waiting", "market_flow", "panel", "product", "unit_price", "config_flow", "contact_flow"):
-            context.user_data.pop(key, None)
-        await message.reply_text("🏠 منوی اصلی SpeedConfig", reply_markup=MAIN_MENU_MARKUP)
-    else:
-        await message.reply_text("این گزینه شناخته نشد؛ لطفاً /start را بزنید.", reply_markup=MAIN_MARKUP)
 
 async def show_tariffs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     percent = load_user_discount_percent(update.effective_user.id)
-    lines = ["━━━━━━━━━━━━━━━━━━", "        💠 تعرفه سرویس‌ها", "━━━━━━━━━━━━━━━━━━"]
+    lines = ["💰 تعرفه سرویس‌ها\n"]
     if percent:
-        lines.append(f"🏷 تخفیف اختصاصی فعال: {percent}٪")
+        lines.append(f"🏷 تخفیف فعال: {percent}٪\n")
     for panel, options in PRODUCTS.items():
-        lines.append(f"\n▎{panel}")
+        lines.append(f"\n{panel}")
         for product, price in options:
             final_price = discounted_price(price, percent)
             if percent:
-                lines.append(f"  • {product}\n    قیمت اصلی: {money(price)} | با تخفیف: {money(final_price)}")
+                lines.append(f"• {product}: قیمت عادی {money(price)} | با تخفیف {money(final_price)}")
             else:
-                lines.append(f"  • {product}: {money(price)}")
-    lines.append("\n━━━━━━━━━━━━━━━━━━\nبرای ثبت سفارش، «خرید سرویس جدید» را انتخاب کنید.")
-    await update.effective_message.reply_text("\n".join(lines), reply_markup=MAIN_MARKUP)
+                lines.append(f"• {product}: {money(price)}")
+    await update.message.reply_text("\n".join(lines), reply_markup=MAIN_MARKUP)
 
 
 def server_selection_markup():
-    keyboard = [[InlineKeyboardButton(f"🌐  {name}", callback_data=f"panel:{i}")]
+    keyboard = [[InlineKeyboardButton(name, callback_data=f"panel:{i}")]
                 for i, name in enumerate(PRODUCTS)]
-    keyboard.append([InlineKeyboardButton("↩️ بازگشت به منوی اصلی", callback_data="back")])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back")])
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -915,11 +800,7 @@ async def begin_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id) and await section_gate(update.effective_message, "purchase"):
         return
     await update.effective_message.reply_text(
-        "━━━━━━━━━━━━━━━━━━\n"
-        "          🛒 خرید سرویس\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        "لطفاً سرویس موردنظر خود را انتخاب کنید.\n"
-        "پس از انتخاب سرویس، حجم یا مدت، نام دلخواه و روش پرداخت را مشخص می‌کنید.",
+        "🌍 لطفاً سرور موردنظر را انتخاب کنید:",
         reply_markup=server_selection_markup(),
     )
 
@@ -966,7 +847,7 @@ async def panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if data == "back":
-        await query.message.reply_text("به منوی اصلی برگشتید.", reply_markup=MAIN_MENU_MARKUP)
+        await query.message.reply_text("به منوی اصلی برگشتید.", reply_markup=MAIN_MARKUP)
         return
 
     if data.startswith("panel:"):
@@ -1123,45 +1004,75 @@ async def handle_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     context.user_data["service_name_waiting"] = True
     await update.message.reply_text(
-        "🏷 لطفا یک نام کاربری انتخاب نمایید\n"
-        "حداکثر 10 کارکتر⚠️\n\n"
-        "نام فقط با حروف انگلیسی، عدد، _ یا - باشد.\n"
-        "می‌توانید خودتان نام را بنویسید یا از دکمه ساخت خودکار استفاده کنید.",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🎲 ساخت نام خودکار", callback_data="service_name:auto")],
-            [InlineKeyboardButton("❌ لغو خرید", callback_data="cancel_order")],
-        ]),
+        "🏷 برای سرویس خود یک نام انتخاب کنید و بفرستید.\n\n"
+        "مثال: سرور گیمینگ شماره ۵۰ یا سرور گوشی\n"
+        "این نام در بخش «سرویس‌های من» نمایش داده می‌شود.",
+        reply_markup=ReplyKeyboardMarkup([["❌ لغو خرید"]], resize_keyboard=True),
     )
     return True
 
 
-async def service_name_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def wallet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
-    if query.data != "service_name:auto":
+    data = query.data or ""
+    user = query.from_user
+    if data.startswith("wallet:review:"):
+        if not is_admin(user.id):
+            await query.answer("فقط ادمین اجازه بررسی درخواست را دارد.", show_alert=True); return
+        await query.answer()
+        _, _, decision, request_id = data.split(":", 3)
+        wallet = load_wallet(); request = wallet.get("requests", {}).get(request_id)
+        if not request:
+            await query.message.reply_text("درخواست شارژ پیدا نشد."); return
+        if request.get("status") != "pending":
+            await query.message.reply_text("این درخواست قبلاً بررسی شده است."); return
+        uid = str(request["user_id"]); amount = int(request["amount"])
+        if not request.get("receipt_file_id"):
+            await query.message.reply_text("❌ برای این درخواست رسید پرداخت ثبت نشده؛ شارژ انجام نشد.")
+            return
+        if decision == "approve":
+            wallet["balances"][uid] = wallet_balance(wallet, uid) + amount
+            request["status"] = "approved"
+            wallet.setdefault("transactions", []).append({"user_id": int(uid), "type": "topup", "amount": amount, "request_id": request_id, "by": user.id, "at": datetime.now().isoformat(timespec="seconds")})
+            save_wallet(wallet)
+            await context.bot.send_message(chat_id=int(uid), text=f"✅ درخواست شارژ تأیید شد.\n💰 مبلغ: {money(amount)}\n💳 اعتبار فعلی: {money(wallet_balance(wallet, uid))}")
+            await query.message.reply_text(f"✅ شارژ درخواست #{request_id} تأیید شد.")
+        elif decision == "reject":
+            request["status"] = "rejected"; request["reviewed_by"] = user.id; save_wallet(wallet)
+            await context.bot.send_message(chat_id=int(uid), text=f"❌ درخواست شارژ {money(amount)} رد شد. برای پیگیری با پشتیبانی تماس بگیرید.")
+            await query.message.reply_text(f"درخواست شارژ #{request_id} رد شد.")
+        try: await query.edit_message_reply_markup(reply_markup=None)
+        except TelegramError: pass
         return
-    pending = context.user_data.get("pending_order")
-    if not pending or not context.user_data.get("service_name_waiting"):
-        await query.message.reply_text("سفارش فعالی برای نام‌گذاری پیدا نشد؛ لطفاً خرید را دوباره شروع کنید.")
+    if data == "wallet:topup":
+        await query.answer(); context.user_data["wallet_topup_waiting"] = True
+        await query.message.reply_text("💳 مبلغ شارژ را به تومان وارد کنید.\nمثال: 100000\nحداقل شارژ ۱۰٬۰۰۰ تومان است. برای لغو بنویسید: لغو")
         return
-    # Short, foreign-looking ASCII service names; customer can still type their own.
-    alphabet = string.ascii_letters + string.digits
-    name = "".join(secrets.choice(alphabet) for _ in range(8))
-    pending["service_name"] = name
-    context.user_data["service_name_waiting"] = False
-    percent = pending.get("discount_percent", 0)
-    discount_line = (f"💵 مبلغ قبل از تخفیف: {money(pending['original_amount'])}\n🏷 تخفیف: {percent}٪\n" if percent else "")
-    await query.message.reply_text(
-        "━━━━━━━━━━━━━━━━━━\n          🧾 خلاصه سفارش\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"🌐 سرویس: {pending['panel']}\n📦 محصول: {pending['product']}\n"
-        f"🏷 نام سرویس: {name}\n📊 حجم / تعداد: {pending['quantity']}\n"
-        f"{discount_line}━━━━━━━━━━━━━━━━━━\n💳 مبلغ نهایی: {money(pending['amount'])} تومان\n━━━━━━━━━━━━━━━━━━\n\n"
-        "روش پرداخت را از دکمه‌های زیر انتخاب کنید.",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ پرداخت با رسید بانکی", callback_data="confirm_order")],
-            [InlineKeyboardButton("❌ لغو خرید", callback_data="cancel_order")],
-        ]),
-    )
+    if data == "wallet:pay":
+        await query.answer(); pending = context.user_data.get("pending_order")
+        if not pending:
+            await query.message.reply_text("سفارش فعالی پیدا نشد؛ خرید را دوباره شروع کنید."); return
+        amount = int(pending.get("amount", 0)); wallet = load_wallet(); uid = str(user.id); balance = wallet_balance(wallet, uid)
+        if amount <= 0:
+            await query.message.reply_text("مبلغ سفارش نامعتبر است."); return
+        if balance < amount:
+            await query.message.reply_text(f"اعتبار کافی نیست.\n💳 اعتبار فعلی: {money(balance)}\n🧾 مبلغ سفارش: {money(amount)}\nلطفاً اعتبار را شارژ کنید یا پرداخت با رسید را انتخاب کنید."); return
+        db = load_db(); order_id = db["next_id"]; db["next_id"] += 1
+        order_number = 1 + max((int(o.get("order_number", 0)) for o in db["orders"].values()), default=0)
+        order = {"id": order_id, "order_number": order_number, "user_id": user.id,
+            "customer_name": " ".join(x for x in [user.first_name, user.last_name] if x) or "بدون نام",
+            "username": f"@{user.username}" if user.username else "ندارد", **pending,
+            "status": "رسید تأییدشده؛ در انتظار کانفیگ", "receipt_file_id": None,
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "reviewed_by": "wallet", "config_sent": False, "payment_method": "wallet"}
+        db["orders"][str(order_id)] = order; save_db(db)
+        wallet["balances"][uid] = balance - amount
+        wallet.setdefault("transactions", []).append({"user_id": user.id, "type": "purchase", "amount": -amount, "order_id": order_id, "at": datetime.now().isoformat(timespec="seconds")}); save_wallet(wallet)
+        context.user_data.pop("pending_order", None); context.user_data.pop("service_name_waiting", None)
+        await query.message.reply_text(f"✅ خرید با اعتبار انجام شد.\n🧾 سفارش: #{order_number}\n💸 مبلغ کسرشده: {money(amount)}\n💳 اعتبار باقی‌مانده: {money(balance-amount)}\n\nکانفیگ پس از آماده‌سازی توسط مدیریت ارسال می‌شود.", reply_markup=MAIN_MARKUP)
+        for admin_id in load_admin_ids():
+            try:
+                await context.bot.send_message(chat_id=admin_id, text="🛒 سفارش جدید — پرداخت از کیف پول تأیید شده\n\n" + order_text(order), reply_markup=admin_order_actions(order_id))
+            except Exception: logger.exception("Could not notify admin about wallet purchase")
 
 
 async def wallet_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1220,16 +1131,10 @@ async def order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["active_receipt_order"] = order_id
     context.user_data.pop("pending_order", None)
     await query.message.reply_text(
-        f"لطفا مبلغ {int(order['amount']):,} تومان ({int(order['amount']) * 10:,} ریال) به کارت زیر واریز نمایید. 👇🏻\n\n"
-        "====================\n"
-        "5022291620713105\n"
-        "محمد امین یوسفی\n"
-        "====================\n\n"
-        "🌅 عکس رسید خود را در این مرحله ارسال نمایید.\n\n"
-        "⚠️ امکان برداشت وجه از کیف پول نیست.\n"
-        "⚠️ مسئولیت واریز اشتباهی با شماست.\n\n"
-        f"🧾 شماره سفارش: #{order_number}\n"
-        "برای انصراف، دکمه لغو خرید را بزنید.",
+        f"✅ شماره سفارش: #{order_number}\n"
+        f"🔐 شناسه داخلی سفارش: #{order_id}\n"
+        "حالا لطفاً عکس رسید پرداخت را ارسال کنید.\n\n"
+        "اگر منصرف شدید، می‌توانید خرید را لغو کنید.",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("❌ لغو خرید", callback_data=f"cancel_active_order:{order_id}")],
             [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="global_back")],
@@ -1268,32 +1173,25 @@ async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     admin_keyboard = admin_order_actions(order_id)
     caption = "📥 سفارش جدید — رسید کارت‌به‌کارت پیوست است\n\n" + order_text(order) + "\n\nاگر رسید معتبر است «ارسال سرور» را بزنید؛ در غیر این صورت «رد خرید»."
-    sent_to_admin = 0
-    for admin_id in sorted(load_admin_ids()):
-        try:
+    try:
+        for admin_id in sorted(load_admin_ids()):
             await context.bot.send_photo(
                 chat_id=admin_id,
                 photo=file_id,
                 caption=caption,
                 reply_markup=admin_keyboard,
             )
-            sent_to_admin += 1
-        except TelegramError:
-            logger.exception("Failed to send receipt for order %s to admin %s", order_id, admin_id)
-    if sent_to_admin:
         await update.message.reply_text(
-            "✅ رسید پرداخت شما دریافت و برای مدیریت ارسال شد.\n\n"
+            "✅ رسید پرداخت شما با موفقیت دریافت و جهت بررسی به واحد مدیریت ارسال شد.\n\n"
             "پس از بررسی، نتیجه از طریق همین ربات به اطلاع شما خواهد رسید.\n"
             "از شکیبایی شما سپاسگزاریم.",
             reply_markup=MAIN_MARKUP,
         )
         context.user_data.pop("active_receipt_order", None)
-    else:
-        # Keep the active order so the customer can retry sending the receipt after
-        # admin chat IDs/permissions are corrected; do not claim it was delivered.
+    except Exception:
+        logger.exception("Failed to notify admin")
         await update.message.reply_text(
-            "⚠️ رسید ثبت شد، اما ارسال آن برای مدیریت ناموفق بود. فعلاً رسید را دوباره نفرستید؛ "
-            "با پشتیبانی تماس بگیرید تا دسترسی ربات به ادمین بررسی شود."
+            "رسید دریافت شد، اما ارسال آن به ادمین انجام نشد. لطفاً کمی بعد دوباره تلاش کنید."
         )
 
 
@@ -1710,6 +1608,34 @@ async def service_info_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await context.bot.send_photo(chat_id=query.from_user.id, photo=order["server_qr_file_id"], caption=f"📷 QR سرویس «{name}»")
 
 
+async def service_info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    try:
+        order_id = str(int(query.data.split(":", 1)[1]))
+    except (ValueError, IndexError):
+        await query.message.reply_text("شناسه سرویس معتبر نیست.")
+        return
+    order = load_db().get("orders", {}).get(order_id)
+    if not order or order.get("user_id") != query.from_user.id or not order.get("config_sent"):
+        await query.message.reply_text("این سرویس پیدا نشد یا متعلق به شما نیست.")
+        return
+    name = order.get("service_name") or order.get("panel") or "سرویس"
+    link = order.get("server_link") or ""
+    config_text = order.get("config_text") or ""
+    await query.message.reply_text(
+        f"📱 اطلاعات ذخیره‌شده سرویس\n🏷 نام: {name}\n🧾 سفارش: #{order.get('order_number', order_id)}\n"
+        f"📦 نوع: {order.get('panel', '—')}\n🔹 محصول: {order.get('product', '—')}\n"
+        f"🔗 لینک: {'ذخیره شده' if link else 'متن کانفیگ ذخیره شده' if config_text else 'ثبت نشده'}\n📷 QR: {'ذخیره شده' if order.get('server_qr_file_id') else 'ثبت نشده'}"
+    )
+    if link:
+        await context.bot.send_message(chat_id=query.from_user.id, text=f"🔗 لینک سرویس «{name}»:\n{link}", disable_web_page_preview=True)
+    elif config_text:
+        await context.bot.send_message(chat_id=query.from_user.id, text=f"🔗 متن کانفیگ سرویس «{name}»:\n{config_text}")
+    if order.get("server_qr_file_id"):
+        await context.bot.send_photo(chat_id=query.from_user.id, photo=order["server_qr_file_id"], caption=f"📷 QR سرویس «{name}»")
+
+
 async def my_services_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -2019,17 +1945,6 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     txt = (update.message.text or "").strip()
 
-    # Compatibility with old clients that still have the previous shortcut button. Admin workflows stay untouched.
-    if txt == "☰ منوی اصلی" and not is_admin(update.effective_user.id):
-        await cancel_active_order(update.effective_user.id, context)
-        for key in ("quantity_waiting", "pending_order", "service_name_waiting", "market_flow", "panel", "product", "unit_price", "config_flow", "contact_flow"):
-            context.user_data.pop(key, None)
-        await update.message.reply_text(
-            "🏠 منوی اصلی SpeedConfig\nبخش موردنظر را انتخاب کنید:",
-            reply_markup=MAIN_MENU_MARKUP,
-        )
-        return
-
     # Admin-only plan editor, broadcast and direct-message workflows.
     if update.effective_user and is_admin(update.effective_user.id):
         if txt in ("لغو", "انصراف", "❌ لغو") and any(k in context.user_data for k in ("admin_plan_flow", "admin_broadcast_waiting", "admin_sendone_stage")):
@@ -2210,6 +2125,39 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(result, reply_markup=admin_panel_markup())
             return
 
+    if context.user_data.get("wallet_topup_waiting"):
+        if txt in ("لغو", "انصراف", "❌ لغو"):
+            context.user_data.pop("wallet_topup_waiting", None)
+            context.user_data.pop("wallet_topup_amount", None)
+            await update.message.reply_text("درخواست شارژ لغو شد.", reply_markup=MAIN_MARKUP); return
+        raw_amount = normalize_digits(txt).replace(",", "").replace("٬", "").replace(" ", "")
+        if not raw_amount.isdigit():
+            await update.message.reply_text("مبلغ را فقط با عدد وارد کنید؛ مثال: 100000"); return
+        amount = int(raw_amount)
+        if amount < 10000 or amount > 100000000:
+            await update.message.reply_text("مبلغ شارژ باید بین ۱۰٬۰۰۰ تا ۱۰۰٬۰۰۰٬۰۰۰ تومان باشد."); return
+        context.user_data["wallet_topup_amount"] = amount
+        context.user_data.pop("wallet_topup_waiting", None)
+        context.user_data["wallet_topup_receipt_waiting"] = True
+        await update.message.reply_text(
+            f"💰 شارژ کیف پول SpeedCon\n\n"
+            f"💵 مبلغ قابل واریز: {money(amount)} تومان\n"
+            "👤 نام صاحب کارت: محمد امین یوسفی\n"
+            "💳 شماره کارت: 5022291620713105\n\n"
+            "لطفاً مبلغ بالا را به کارت اعلام‌شده واریز کنید و سپس عکس رسید را همین‌جا ارسال کنید.\n"
+            "پس از ارسال رسید، درخواست برای ادمین می‌رود. فقط پس از تأیید ادمین، مبلغ به کیف پول شما اضافه می‌شود.\n\n"
+            "برای لغو بنویسید: لغو",
+            reply_markup=ReplyKeyboardMarkup([["❌ لغو"]], resize_keyboard=True),
+        )
+        return
+    if context.user_data.get("wallet_topup_receipt_waiting"):
+        if txt in ("لغو", "انصراف", "❌ لغو"):
+            context.user_data.pop("wallet_topup_receipt_waiting", None)
+            context.user_data.pop("wallet_topup_amount", None)
+            await update.message.reply_text("درخواست شارژ لغو شد.", reply_markup=MAIN_MARKUP); return
+        await update.message.reply_text("لطفاً عکس رسید واریز را به‌صورت تصویر ارسال کنید؛ یا برای لغو بنویسید «لغو».")
+        return
+
     # A selected support reply takes priority over config delivery and customer flows.
     if await deliver_support_reply(update, context):
         return
@@ -2225,11 +2173,8 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop("pending_order", None)
             await update.message.reply_text("خرید لغو شد.", reply_markup=MAIN_MARKUP)
             return
-        if not re.fullmatch(r"[A-Za-z0-9_-]{1,10}", txt):
-            await update.message.reply_text(
-                "⚠️ نام باید حداکثر ۱۰ کاراکتر و فقط شامل حروف انگلیسی، عدد، _ یا - باشد.\n"
-                "مثال: AminX50 یا Speed_01"
-            )
+        if not txt or len(txt) > 50:
+            await update.message.reply_text("نام سرویس باید بین ۱ تا ۵۰ نویسه باشد. دوباره بفرستید.")
             return
         pending = context.user_data.get("pending_order")
         if not pending:
@@ -2241,19 +2186,13 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         percent = pending.get("discount_percent", 0)
         discount_line = (f"💵 مبلغ قبل از تخفیف: {money(pending['original_amount'])}\n🏷 تخفیف: {percent}٪\n" if percent else "")
         await update.message.reply_text(
-            "━━━━━━━━━━━━━━━━━━\n"
-            "          🧾 خلاصه سفارش\n"
-            "━━━━━━━━━━━━━━━━━━\n\n"
-            f"🌐 سرویس: {pending['panel']}\n"
-            f"📦 محصول: {pending['product']}\n"
-            f"🏷 نام سرویس: {txt}\n"
-            f"📊 حجم / تعداد: {pending['quantity']}\n"
-            f"{discount_line}━━━━━━━━━━━━━━━━━━\n"
-            f"💳 مبلغ نهایی: {money(pending['amount'])} تومان\n"
-            "━━━━━━━━━━━━━━━━━━\n\n"
-            "روش پرداخت را از دکمه‌های زیر انتخاب کنید.",
+            f"🧾 خلاصه سفارش\n\n🌐 سرویس: {pending['panel']}\n📦 محصول: {pending['product']}\n"
+            f"🏷 نام انتخابی شما: {txt}\n📊 حجم/تعداد: {pending['quantity']}\n"
+            f"{discount_line}💵 مبلغ قابل پرداخت: {money(pending['amount'])}\n\n"
+            "💳 پس از ثبت سفارش، عکس رسید پرداخت را ارسال کنید.",
             reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ پرداخت با رسید بانکی", callback_data="confirm_order")],
+                [InlineKeyboardButton("💳 پرداخت با اعتبار من", callback_data="wallet:pay")],
+                [InlineKeyboardButton("✅ پرداخت با رسید بانکی", callback_data="confirm_order")],
                 [InlineKeyboardButton("❌ لغو خرید", callback_data="cancel_order")],
             ]),
         )
@@ -2372,6 +2311,9 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await my_orders(update, context)
     elif txt == "💡 آموزش استفاده":
         await update.message.reply_text("آموزش استفاده فعلاً در حال آماده‌سازی است.", reply_markup=MAIN_MARKUP)
+    elif txt == "💰 اعتبار من":
+        # Customer-facing wallet section is temporarily disabled; admin wallet tools remain untouched.
+        await update.message.reply_text("⏳ این بخش به‌زودی فعال می‌شود.", reply_markup=MAIN_MARKUP)
     elif txt == "🎗️ کاربران برتر":
         await update.message.reply_text("فهرست کاربران برتر فعلاً در دسترس نیست.", reply_markup=MAIN_MARKUP)
     elif txt == "👥 معرفی به دوستان":
@@ -2511,6 +2453,46 @@ async def market_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def market_photo_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Wallet top-up receipt must be handled before config/media flows.
+    if context.user_data.get("wallet_topup_receipt_waiting") and update.message and update.message.photo:
+        amount = int(context.user_data.get("wallet_topup_amount", 0) or 0)
+        if amount < 10000:
+            context.user_data.pop("wallet_topup_receipt_waiting", None)
+            context.user_data.pop("wallet_topup_amount", None)
+            await update.message.reply_text("درخواست شارژ منقضی شده است؛ لطفاً دوباره از بخش اعتبار من شروع کنید.")
+            return
+        user = update.effective_user
+        wallet = load_wallet()
+        request_id = int(wallet.get("next_request_id", 1))
+        wallet["next_request_id"] = request_id + 1
+        receipt_file_id = update.message.photo[-1].file_id
+        request = {
+            "id": request_id, "user_id": user.id, "amount": amount,
+            "status": "pending", "receipt_file_id": receipt_file_id,
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        wallet.setdefault("requests", {})[str(request_id)] = request
+        save_wallet(wallet)
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✅ تأیید شارژ", callback_data=f"wallet:review:approve:{request_id}"), InlineKeyboardButton("❌ رد درخواست", callback_data=f"wallet:review:reject:{request_id}")]])
+        sent = 0
+        caption = (f"💰 درخواست شارژ اعتبار #{request_id}\n"
+                   f"👤 مشتری: {user.full_name}\n🆔 آیدی: {user.id}\n"
+                   f"💵 مبلغ درخواستی: {money(amount)} تومان\n\n"
+                   "📸 رسید پرداخت مشتری؛ لطفاً تصویر و مبلغ را بررسی کنید.")
+        for admin_id in load_admin_ids():
+            try:
+                await context.bot.send_photo(chat_id=admin_id, photo=receipt_file_id, caption=caption, reply_markup=keyboard)
+                sent += 1
+            except Exception:
+                logger.exception("Could not send wallet top-up receipt to admin %s", admin_id)
+        context.user_data.pop("wallet_topup_receipt_waiting", None)
+        context.user_data.pop("wallet_topup_amount", None)
+        if sent:
+            await update.message.reply_text("✅ رسید واریز دریافت و برای ادمین ارسال شد. پس از بررسی رسید، اعتبار شما تأیید یا رد می‌شود.", reply_markup=MAIN_MARKUP)
+        else:
+            # Keep the request pending for retry/administrator visibility; inform customer clearly.
+            await update.message.reply_text("⚠️ رسید ثبت شد، اما ارسال آن برای ادمین ناموفق بود. لطفاً با پشتیبانی تماس بگیرید و دوباره درخواست نسازید.", reply_markup=MAIN_MARKUP)
+        return
     if await handle_config_media(update, context):
         return
     flow = context.user_data.get("market_flow")
@@ -3406,7 +3388,6 @@ def main():
     app.add_handler(CommandHandler("admins", admins_command))
     app.add_handler(CommandHandler("admin", admin_panel_command))
     app.add_handler(CallbackQueryHandler(admin_panel_callback, pattern=r"^adminpanel:(orders|prices|update|online|sections|admins|broadcast|addadmin|refresh|close|servers|price_menu|discount_menu|discount_cancel|close_all|open_all|noop|toggle:(gaming|v2ray|unlimited)|price_cancel|price:\d+:\d+|plans|plan_product:\d+|plan_add:\d+|plan_label:\d+:\d+|plan_price:\d+:\d+|plan_delete:\d+:\d+|broadcast_menu|broadcast_send|broadcast_cancel|sendone_menu|sendone_send|sendone_cancel)$"))
-    app.add_handler(CallbackQueryHandler(main_menu_callback, pattern=r"^main:(show|buy|services|renew|tariffs|test|usage|referral|topusers|agency|market|virtual|support|servers|home)$"))
     app.add_handler(CommandHandler("setdiscount", setdiscount_command))
     app.add_handler(CommandHandler("discount_user", discount_user_command))
     app.add_handler(CommandHandler("discount", discount_command))
@@ -3422,7 +3403,7 @@ def main():
     app.add_handler(CommandHandler("orders", admin_orders))
     app.add_handler(CommandHandler("sendconfig", sendconfig_command))
     app.add_handler(CommandHandler("wallet_add", wallet_admin_command))
-    app.add_handler(CallbackQueryHandler(service_name_callback, pattern=r"^service_name:auto$"))
+    app.add_handler(CallbackQueryHandler(wallet_callback, pattern=r"^wallet:"))
     app.add_handler(CommandHandler("test_add", test_add_command))
     app.add_handler(CommandHandler("test_list", test_list_command))
     app.add_handler(CommandHandler("section_close", section_close_command))
@@ -3435,6 +3416,8 @@ def main():
     app.add_handler(CallbackQueryHandler(order_callback, pattern=r"^(confirm_order|cancel_order)$"))
     app.add_handler(CallbackQueryHandler(my_service_callback, pattern=r"^myservice:\d+$"))
     app.add_handler(CallbackQueryHandler(service_info_callback, pattern=r"^service_info:\d+$"))
+    app.add_handler(CallbackQueryHandler(service_info_callback, pattern=r"^service_info:\d+$"))
+    app.add_handler(CallbackQueryHandler(my_service_callback, pattern=r"^service_info:\d+$"))
     app.add_handler(CallbackQueryHandler(my_services_page_callback, pattern=r"^myservices_page:\d+$"))
     app.add_handler(CallbackQueryHandler(renew_service_callback, pattern=r"^renew_service:\d+$"))
     app.add_handler(CallbackQueryHandler(order_action_callback, pattern=r"^order_action:(send|reject):\d+$"))
