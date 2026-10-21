@@ -1168,7 +1168,6 @@ async def service_name_callback(update: Update, context: ContextTypes.DEFAULT_TY
         f"{discount_line}━━━━━━━━━━━━━━━━━━\n💳 مبلغ نهایی: {money(pending['amount'])} تومان\n━━━━━━━━━━━━━━━━━━\n\n"
         "روش پرداخت را از دکمه‌های زیر انتخاب کنید.",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("💳 پرداخت با اعتبار من", callback_data="wallet:pay")],
             [InlineKeyboardButton("✅ پرداخت با رسید بانکی", callback_data="confirm_order")],
             [InlineKeyboardButton("❌ لغو خرید", callback_data="cancel_order")],
         ]),
@@ -1242,6 +1241,8 @@ async def wallet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     if data == "wallet:pay":
+        await query.answer("پرداخت سفارش فقط با کارت‌به‌کارت انجام می‌شود.", show_alert=True)
+        return
         await query.answer(); pending = context.user_data.get("pending_order")
         if not pending:
             await query.message.reply_text("سفارش فعالی پیدا نشد؛ خرید را دوباره شروع کنید."); return
@@ -2393,8 +2394,7 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "━━━━━━━━━━━━━━━━━━\n\n"
             "روش پرداخت را از دکمه‌های زیر انتخاب کنید.",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("💳 پرداخت با اعتبار من", callback_data="wallet:pay")],
-                [InlineKeyboardButton("✅ پرداخت با رسید بانکی", callback_data="confirm_order")],
+                    [InlineKeyboardButton("✅ پرداخت با رسید بانکی", callback_data="confirm_order")],
                 [InlineKeyboardButton("❌ لغو خرید", callback_data="cancel_order")],
             ]),
         )
