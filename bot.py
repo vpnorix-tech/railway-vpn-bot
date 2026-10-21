@@ -22,6 +22,7 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
     KeyboardButton,
     InputMediaPhoto,
 )
@@ -146,22 +147,26 @@ def save_price_overrides():
 
 load_price_overrides()
 
-# Customer-facing menu only. Admin panel and its handlers are intentionally unchanged.
-MAIN_MENU = [
-    ["🚀 خرید سرویس جدید", "📱 سرویس‌های من"],
-    ["♻️ تمدید سرویس", "💰 اعتبار من"],
-    ["💰 تعرفه سرویس‌ها", "🧪 اکانت تست"],
-    ["💡 آموزش استفاده", "👥 معرفی به دوستان"],
-    ["🎗️ کاربران برتر", "🤝 درخواست نمایندگی"],
-    ["🎮 شاپ اکانت بازی‌ها", "💎 خدمات مجازی"],
-    ["🧑🏻‍💻 تماس با پشتیبانی"],
-    ["🔙 بازگشت به انتخاب سرور", "🔙 منوی اصلی"],
-]
-MAIN_MARKUP = ReplyKeyboardMarkup(
-    MAIN_MENU, resize_keyboard=True, one_time_keyboard=False, is_persistent=True
+# Customer-facing menus only. Admin panel and its handlers are intentionally unchanged.
+# The main menu uses inline buttons inside the chat, so it no longer occupies the bottom keyboard.
+MAIN_MENU_MARKUP = InlineKeyboardMarkup([
+    [InlineKeyboardButton("🚀 خرید سرویس جدید", callback_data="main:buy"), InlineKeyboardButton("📱 سرویس‌های من", callback_data="main:services")],
+    [InlineKeyboardButton("♻️ تمدید سرویس", callback_data="main:renew"), InlineKeyboardButton("💰 اعتبار من", callback_data="main:wallet")],
+    [InlineKeyboardButton("💰 تعرفه سرویس‌ها", callback_data="main:tariffs"), InlineKeyboardButton("🧪 اکانت تست", callback_data="main:test")],
+    [InlineKeyboardButton("💡 آموزش استفاده", callback_data="main:usage"), InlineKeyboardButton("👥 معرفی به دوستان", callback_data="main:referral")],
+    [InlineKeyboardButton("🎗️ کاربران برتر", callback_data="main:topusers"), InlineKeyboardButton("🤝 درخواست نمایندگی", callback_data="main:agency")],
+    [InlineKeyboardButton("🎮 شاپ اکانت بازی‌ها", callback_data="main:market"), InlineKeyboardButton("💎 خدمات مجازی", callback_data="main:virtual")],
+    [InlineKeyboardButton("🧑🏻‍💻 تماس با پشتیبانی", callback_data="main:support")],
+    [InlineKeyboardButton("🔙 بازگشت به انتخاب سرور", callback_data="main:servers"), InlineKeyboardButton("🏠 منوی اصلی", callback_data="main:home")],
+])
+# Compact one-time bottom keyboard: Telegram can hide/minimize it, while the actual menu uses inline buttons.
+MAIN_REPLY_MARKUP = ReplyKeyboardMarkup(
+    [["☰ منوی اصلی"]], resize_keyboard=True, one_time_keyboard=True, is_persistent=False
 )
-
-
+# Compact button appended to status/results instead of repeatedly showing the entire menu.
+MAIN_MARKUP = InlineKeyboardMarkup([
+    [InlineKeyboardButton("🏠 نمایش منوی اصلی", callback_data="main:show")]
+])
 
 
 def load_admin_ids():
@@ -760,7 +765,7 @@ async def global_back_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data.pop("panel", None)
     context.user_data.pop("product", None)
     context.user_data.pop("unit_price", None)
-    await query.message.reply_text("به منوی اصلی برگشتید.", reply_markup=MAIN_MARKUP)
+    await query.message.reply_text("به منوی اصلی برگشتید.", reply_markup=MAIN_MENU_MARKUP)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -769,6 +774,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await access_gate(update, context):
         return
     context.user_data.clear()
+    # Clear the old persistent reply keyboard from previous bot versions.
+    await update.message.reply_text(
+        "منوی قدیمی به‌روزرسانی شد؛ از دکمه‌های داخل پیام استفاده کنید.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
     await update.message.reply_text(
         "━━━━━━━━━━━━━━━━━━\n"
         "          SPEEDCONFIG\n"
@@ -776,11 +786,119 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "━━━━━━━━━━━━━━━━━━\n\n"
         "سلام و خوش آمدید 👋\n"
         "به پنل خدمات SpeedConfig خوش آمدید.\n\n"
-        "از منوی پایین، بخش موردنظر خود را انتخاب کنید.\n"
-        "برای پیگیری سفارش‌ها و مدیریت سرویس‌ها، از بخش «سرویس‌های من» استفاده کنید.",
-        reply_markup=MAIN_MARKUP,
+        "منوی اصلی با دکمه‌های شیشه‌ای در پیام بعدی قرار دارد.\n"
+        "برای بازکردن دوباره آن، از دکمه کوچک «☰ منوی اصلی» استفاده کنید.",
+        reply_markup=MAIN_REPLY_MARKUP,
+    )
+    await update.message.reply_text(
+        "🏠 منوی اصلی SpeedConfig\nبخش موردنظر را انتخاب کنید:",
+        reply_markup=MAIN_MENU_MARKUP,
     )
 
+
+async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Routes customer-facing inline menu buttons. The separate admin panel is unchanged.
+    query = update.callback_query
+    if not query:
+        return
+    parts = (query.data or "").split(":", 1)
+    action = parts[1] if len(parts) == 2 else ""
+
+    if action == "show":
+        await query.answer()
+        try:
+            await query.edit_message_reply_markup(reply_markup=MAIN_MENU_MARKUP)
+        except TelegramError:
+            await query.message.reply_text("منوی اصلی:", reply_markup=MAIN_MENU_MARKUP)
+        return
+
+    await query.answer()
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except TelegramError:
+        pass
+
+    user = query.from_user
+    message = query.message
+    if not user or not message:
+        return
+
+    if action in ("buy", "servers"):
+        await begin_purchase(update, context)
+    elif action == "services":
+        await my_orders(update, context)
+    elif action == "renew":
+        if not is_admin(user.id) and await section_gate(message, "renew"):
+            return
+        await my_orders(update, context)
+    elif action == "tariffs":
+        if not is_admin(user.id) and await section_gate(message, "tariffs"):
+            return
+        await show_tariffs(update, context)
+    elif action == "test":
+        if not is_admin(user.id) and await section_gate(message, "test"):
+            return
+        await message.reply_text(
+            "🧪 دریافت اکانت تست\n\nهر کاربر فقط یک‌بار می‌تواند تست دریافت کند. لینک‌ها به ترتیب توسط ادمین اضافه می‌شوند و هر لینک فقط یک‌بار از صف تحویل داده می‌شود.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🎁 دریافت اکانت تست رایگان", callback_data="test:request")],
+                [InlineKeyboardButton("🏠 منوی اصلی", callback_data="main:home")],
+            ]),
+        )
+    elif action == "wallet":
+        wallet = load_wallet()
+        balance = wallet_balance(wallet, user.id)
+        await message.reply_text(
+            f"💰 کیف پول شما\n\n💳 اعتبار فعلی: {money(balance)}\n\nبرای شارژ، مبلغ دلخواه را وارد کنید. درخواست شما برای ادمین ارسال می‌شود و پس از تأیید پرداخت، اعتبار اضافه خواهد شد.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("➕ شارژ اعتبار", callback_data="wallet:topup")],
+                [InlineKeyboardButton("🏠 منوی اصلی", callback_data="main:home")],
+            ]),
+        )
+    elif action == "usage":
+        await message.reply_text("آموزش استفاده فعلاً در حال آماده‌سازی است.", reply_markup=MAIN_MARKUP)
+    elif action == "topusers":
+        await message.reply_text("فهرست کاربران برتر فعلاً در دسترس نیست.", reply_markup=MAIN_MARKUP)
+    elif action == "referral":
+        bot_username = context.bot_data.get("bot_username", "")
+        referral_text = (f"لینک معرفی شما:\nhttps://t.me/{bot_username}?start={user.id}"
+                         if bot_username else "لینک معرفی در دسترس نیست.")
+        await message.reply_text(referral_text, reply_markup=MAIN_MARKUP)
+    elif action == "support":
+        context.user_data["contact_flow"] = "support"
+        await message.reply_text(
+            "🧑🏻‍💻 پیام خود را برای پشتیبانی بنویسید تا برای مدیریت ارسال شود.\n\nبرای لغو، کلمه «لغو» را بفرستید.",
+            reply_markup=MAIN_MARKUP,
+        )
+    elif action == "agency":
+        context.user_data["contact_flow"] = "representative"
+        await message.reply_text(
+            "🤝 درخواست نمایندگی\n\nلطفاً در یک پیام این اطلاعات را بنویسید: نام، شهر/کشور، روش جذب مشتری و سابقه فروش (در صورت وجود).\n\nدرخواست شما برای مدیریت ارسال می‌شود. برای لغو، کلمه «لغو» را بفرستید.",
+            reply_markup=MAIN_MARKUP,
+        )
+    elif action == "market":
+        if not is_admin(user.id) and await section_gate(message, "market"):
+            return
+        await market_open(update, context)
+    elif action == "virtual":
+        if not is_admin(user.id) and await section_gate(message, "virtual"):
+            return
+        await message.reply_text(
+            "💎 خدمات مجازی\n\nپلن موردنظر تلگرام پرمیوم را انتخاب کنید:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("💎 تلگرام پرمیوم — ۱ ماه | ۱٬۲۰۰٬۰۰۰ تومان", callback_data="virtual:0")],
+                [InlineKeyboardButton("💎 تلگرام پرمیوم — ۳ ماه | ۳٬۹۰۰٬۰۰۰ تومان", callback_data="virtual:1")],
+                [InlineKeyboardButton("💎 تلگرام پرمیوم — ۶ ماه | ۸٬۰۰۰٬۰۰۰ تومان", callback_data="virtual:2")],
+                [InlineKeyboardButton("🏠 منوی اصلی", callback_data="main:home")],
+            ]),
+        )
+    elif action == "home":
+        await cancel_active_order(user.id, context)
+        for key in ("quantity_waiting", "pending_order", "service_name_waiting", "market_flow", "panel", "product", "unit_price", "config_flow", "contact_flow"):
+            context.user_data.pop(key, None)
+        await message.reply_text("🏠 منوی اصلی SpeedConfig", reply_markup=MAIN_MENU_MARKUP)
+    else:
+        await message.reply_text("این گزینه شناخته نشد؛ لطفاً /start را بزنید.", reply_markup=MAIN_MARKUP)
 
 async def show_tariffs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     percent = load_user_discount_percent(update.effective_user.id)
@@ -796,7 +914,7 @@ async def show_tariffs(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 lines.append(f"  • {product}: {money(price)}")
     lines.append("\n━━━━━━━━━━━━━━━━━━\nبرای ثبت سفارش، «خرید سرویس جدید» را انتخاب کنید.")
-    await update.message.reply_text("\n".join(lines), reply_markup=MAIN_MARKUP)
+    await update.effective_message.reply_text("\n".join(lines), reply_markup=MAIN_MARKUP)
 
 
 def server_selection_markup():
@@ -861,7 +979,7 @@ async def panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if data == "back":
-        await query.message.reply_text("به منوی اصلی برگشتید.", reply_markup=MAIN_MARKUP)
+        await query.message.reply_text("به منوی اصلی برگشتید.", reply_markup=MAIN_MENU_MARKUP)
         return
 
     if data.startswith("panel:"):
@@ -2007,6 +2125,17 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await access_gate(update, context):
         return
     txt = (update.message.text or "").strip()
+
+    # The one-button reply keyboard is only a shortcut to the inline menu. Admin-only workflows stay untouched.
+    if txt == "☰ منوی اصلی" and not is_admin(update.effective_user.id):
+        await cancel_active_order(update.effective_user.id, context)
+        for key in ("quantity_waiting", "pending_order", "service_name_waiting", "market_flow", "panel", "product", "unit_price", "config_flow", "contact_flow"):
+            context.user_data.pop(key, None)
+        await update.message.reply_text(
+            "🏠 منوی اصلی SpeedConfig\nبخش موردنظر را انتخاب کنید:",
+            reply_markup=MAIN_MENU_MARKUP,
+        )
+        return
 
     # Admin-only plan editor, broadcast and direct-message workflows.
     if update.effective_user and is_admin(update.effective_user.id):
@@ -3468,6 +3597,7 @@ def main():
     app.add_handler(CommandHandler("admins", admins_command))
     app.add_handler(CommandHandler("admin", admin_panel_command))
     app.add_handler(CallbackQueryHandler(admin_panel_callback, pattern=r"^adminpanel:(orders|prices|update|online|sections|admins|broadcast|addadmin|refresh|close|servers|price_menu|discount_menu|discount_cancel|close_all|open_all|noop|toggle:(gaming|v2ray|unlimited)|price_cancel|price:\d+:\d+|plans|plan_product:\d+|plan_add:\d+|plan_label:\d+:\d+|plan_price:\d+:\d+|plan_delete:\d+:\d+|broadcast_menu|broadcast_send|broadcast_cancel|sendone_menu|sendone_send|sendone_cancel)$"))
+    app.add_handler(CallbackQueryHandler(main_menu_callback, pattern=r"^main:(show|buy|services|renew|wallet|tariffs|test|usage|referral|topusers|agency|market|virtual|support|servers|home)$"))
     app.add_handler(CommandHandler("setdiscount", setdiscount_command))
     app.add_handler(CommandHandler("discount_user", discount_user_command))
     app.add_handler(CommandHandler("discount", discount_command))
