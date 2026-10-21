@@ -159,10 +159,8 @@ MAIN_MENU_MARKUP = InlineKeyboardMarkup([
     [InlineKeyboardButton("🧑🏻‍💻 تماس با پشتیبانی", callback_data="main:support")],
     [InlineKeyboardButton("🔙 بازگشت به انتخاب سرور", callback_data="main:servers"), InlineKeyboardButton("🏠 منوی اصلی", callback_data="main:home")],
 ])
-# Compact one-time bottom keyboard: Telegram can hide/minimize it, while the actual menu uses inline buttons.
-MAIN_REPLY_MARKUP = ReplyKeyboardMarkup(
-    [["☰ منوی اصلی"]], resize_keyboard=True, one_time_keyboard=True, is_persistent=False
-)
+# No customer reply keyboard: the menu is inline, so it does not occupy the bottom half of the screen.
+# ReplyKeyboardRemove on /start clears the oversized keyboard left by older versions.
 # Compact button appended to status/results instead of repeatedly showing the entire menu.
 MAIN_MARKUP = InlineKeyboardMarkup([
     [InlineKeyboardButton("🏠 نمایش منوی اصلی", callback_data="main:show")]
@@ -786,9 +784,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "━━━━━━━━━━━━━━━━━━\n\n"
         "سلام و خوش آمدید 👋\n"
         "به پنل خدمات SpeedConfig خوش آمدید.\n\n"
-        "منوی اصلی با دکمه‌های شیشه‌ای در پیام بعدی قرار دارد.\n"
-        "برای بازکردن دوباره آن، از دکمه کوچک «☰ منوی اصلی» استفاده کنید.",
-        reply_markup=MAIN_REPLY_MARKUP,
+        "برای استفاده از بخش‌ها، دکمه‌های شیشه‌ای زیر را انتخاب کنید.\n"
+        "منوی پایین حذف شده تا فضای بیشتری برای گفتگو داشته باشید.",
     )
     await update.message.reply_text(
         "🏠 منوی اصلی SpeedConfig\nبخش موردنظر را انتخاب کنید:",
@@ -2126,7 +2123,7 @@ async def menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     txt = (update.message.text or "").strip()
 
-    # The one-button reply keyboard is only a shortcut to the inline menu. Admin-only workflows stay untouched.
+    # Compatibility with old clients that still have the previous shortcut button. Admin workflows stay untouched.
     if txt == "☰ منوی اصلی" and not is_admin(update.effective_user.id):
         await cancel_active_order(update.effective_user.id, context)
         for key in ("quantity_waiting", "pending_order", "service_name_waiting", "market_flow", "panel", "product", "unit_price", "config_flow", "contact_flow"):
